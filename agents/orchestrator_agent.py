@@ -1,3 +1,17 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """5-Agent Generic Omnichannel Orchestrator for AstraZeneca Campaign Lab (UC4).
 
 Coordinates:
@@ -9,9 +23,11 @@ Coordinates:
 """
 from __future__ import annotations
 
+import datetime
 import logging
+import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from google.cloud import storage
 
@@ -41,21 +57,90 @@ from tools.video_tools import generate_campaign_video_mp4
 logger = logging.getLogger(__name__)
 
 
-def upload_deliverable_to_gcs(local_path: str, subfolder: str = "deliverables") -> Dict[str, str]:
-    """Upload a generated deliverable to the dedicated UC4 GCS bucket/prefix and return authenticated URLs."""
+def verify_signed_url_preflight(signed_url: str) -> bool:
+    """Verify a V4 Signed URL with an unauthenticated HTTP GET (Range: bytes=0-0 -> HTTP 200/206)."""
+    if not signed_url or "X-Goog-Signature=" not in signed_url:
+        return False
+    try:
+        req = urllib.request.Request(
+            signed_url,
+            headers={"Range": "bytes=0-0"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            status_code = getattr(resp, "status", None) or resp.getcode()
+            return status_code in (200, 206)
+    except Exception as exc:
+        logger.debug("Pre-flight V4 signed URL verification note: %s", exc)
+        return False
+
+
+def generate_v4_signed_url(
+    bucket_name: str,
+    blob_path: str,
+    expiration_days: int = 7,
+) -> str:
+    """Generate a 7-day V4 Signed URL signed via IAM signBlob (`google.auth.iam.Signer`)."""
+    import google.auth
+    from google.auth import iam
+    from google.auth.transport import requests as google_requests
+    from google.oauth2 import service_account
+
+    settings = get_settings()
+    signing_sa = settings.signing_service_account
+    creds, _ = google.auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+    auth_req = google_requests.Request()
+    if not getattr(creds, "valid", False):
+        creds.refresh(auth_req)
+
+    client = storage.Client(project=settings.google_cloud_project, credentials=creds)
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(blob_path)
+
+    signer = iam.Signer(auth_req, creds, signing_sa)
+    signing_creds = service_account.Credentials(
+        signer=signer,
+        service_account_email=signing_sa,
+        token_uri="https://oauth2.googleapis.com/token",
+    )
+
+    signed_url = blob.generate_signed_url(
+        version="v4",
+        expiration=datetime.timedelta(days=expiration_days),
+        method="GET",
+        credentials=signing_creds,
+    )
+    return signed_url
+
+
+def upload_deliverable_to_gcs(
+    local_path: str,
+    subfolder: str = "deliverables",
+    session_id: str = "global",
+) -> Dict[str, str]:
+    """Upload a generated deliverable to `gs://astrazeneca-ge-pilot-usecase/UC4/` and return a 7-day V4 Signed URL."""
     settings = get_settings()
     p = Path(local_path)
     if not p.exists():
-        return {"local_path": local_path, "gcs_uri": "", "authenticated_url": ""}
+        return {
+            "local_path": local_path,
+            "gcs_uri": "",
+            "signed_url": "",
+            "authenticated_url": "",
+        }
 
+    bucket_name = settings.gcs_assets_bucket.replace("gs://", "").strip("/").split("/")[0]
     prefix = settings.gcs_folder_prefix.strip("/")
-    blob_name = f"{prefix}/{subfolder}/{p.name}"
-    gcs_uri = f"gs://{settings.gcs_assets_bucket}/{blob_name}"
-    auth_url = f"https://storage.mtls.cloud.google.com/{settings.gcs_assets_bucket}/{blob_name}"
+    blob_name = f"{prefix}/astrazeneca_campaign_lab/{session_id}/{subfolder}/{p.name}"
+    gcs_uri = f"gs://{bucket_name}/{blob_name}"
+    auth_url = f"https://storage.mtls.cloud.google.com/{bucket_name}/{blob_name}"
+    signed_url = auth_url
 
     try:
         client = storage.Client(project=settings.google_cloud_project)
-        bucket = client.bucket(settings.gcs_assets_bucket)
+        bucket = client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
         content_type_map = {
             ".png": "image/png",
@@ -67,27 +152,37 @@ def upload_deliverable_to_gcs(local_path: str, subfolder: str = "deliverables") 
         }
         blob.upload_from_filename(
             str(p),
-            content_type=content_type_map.get(p.suffix.lower(), "application/octet-stream"),
+            content_type=content_type_map.get(
+                p.suffix.lower(), "application/octet-stream"
+            ),
         )
+        try:
+            signed_url = generate_v4_signed_url(bucket_name, blob_name, expiration_days=7)
+        except Exception as sign_exc:
+            logger.debug("V4 signing fallback to authenticated URL: %s", sign_exc)
     except Exception as exc:
         logger.info("Offline or skipped GCS upload for %s: %s", p.name, exc)
 
     return {
         "local_path": str(p),
         "gcs_uri": gcs_uri,
+        "signed_url": signed_url,
         "authenticated_url": auth_url,
     }
 
 
 def run_full_campaign_lab_pipeline(
     campaign_name: str,
-    campaign_objective: str = "Launch a high-impact scientific and commercial campaign highlighting complementary mechanisms and unified brand storytelling.",
+    campaign_objective: str = (
+        "Launch a high-impact scientific and commercial campaign highlighting "
+        "complementary mechanisms and unified brand storytelling."
+    ),
     master_strapline: str = "TWO DISTINCT PATHWAYS. ONE BALANCED FORCE.",
     theme_prompt: str = "astrazeneca_light",
     include_az_logo: Optional[bool] = None,
     video_length_mode: str = "short",
     attached_file_path: Optional[str] = None,
-    upload_to_gcs: bool = False,
+    upload_to_gcs: bool = True,
 ) -> Dict[str, Any]:
     """Execute the end-to-end generic AstraZeneca Campaign Lab studio pipeline for any product or theme.
 
@@ -103,7 +198,7 @@ def run_full_campaign_lab_pipeline(
         upload_to_gcs: Whether to upload generated assets to gs://astrazeneca-ge-pilot-usecase/UC4/.
 
     Returns:
-        Dictionary of all generated deliverables, theme metadata, grounded insights, and GCS URLs.
+        Dictionary of all generated deliverables, theme metadata, grounded insights, and V4 Signed GCS URLs.
     """
     ensure_astrazeneca_logo_assets()
     theme = parse_brand_theme(theme_prompt, include_az_logo=include_az_logo)
