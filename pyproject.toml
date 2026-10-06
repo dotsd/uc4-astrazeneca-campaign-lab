@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uc4-astrazeneca-campaign-lab"
+version = "1.0.0"
+description = "AstraZeneca Campaign Lab (UC4) — Generic Multimodal Campaign & Brand Studio with Google Search Grounding, Dynamic Theme Engine, 4K Slide Decks, Extended PDFs, SVG Charts/Logos, and Short/Long Videos"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "AstraZeneca Commercial & Scientific AI Studio"}
+]
+dependencies = [
+    "google-adk>=1.0.0",
+    "google-genai>=1.10.0",
+    "google-cloud-aiplatform[adk,agent_engines]>=1.88.0",
+    "google-cloud-storage>=2.18.0",
+    "google-cloud-texttospeech>=2.21.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.6.0",
+    "python-dotenv>=1.0.1",
+    "reportlab>=4.2.5",
+    "python-docx>=1.1.2",
+    "pillow>=11.0.0",
+    "matplotlib>=3.9.2",
+    "numpy>=2.1.0",
+    "pypdf>=5.1.0",
+    "httpx>=0.28.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v"
