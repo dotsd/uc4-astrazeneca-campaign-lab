@@ -57,7 +57,9 @@ class Settings(BaseSettings):
     # Gemini Enterprise & Reasoning Engine
     gemini_enterprise_engine_id: str = "gemini-enterprise-commerci_1781864147849"
     gemini_enterprise_location: str = "eu"
-    existing_reasoning_engine_id: str = ""
+    existing_reasoning_engine_id: str = (
+        "projects/726684663091/locations/europe-west1/reasoningEngines/5973077126683820032"
+    )
 
     # Datastore (Disabled by default for UC4 — uses Google Search Grounding + User Attachments)
     enable_datastore: bool = False
