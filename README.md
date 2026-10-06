@@ -1,13 +1,13 @@
-# AstraZeneca Campaign Lab (`UC4`)
+# AstraZeneca Campaign Lab
 
-> **Generic Multimodal Campaign, Brand Look & Feel & Scientific Communications Studio**  
+> **Executive Campaign Partner & Autonomous Pharmaceutical Marketing Multi-Agent System**  
 > **Powered by Google ADK · Vertex AI Agent Engine · Gemini Enterprise · Google Search Grounding**
 
 ---
 
 ## 1. Executive Overview
 
-**AstraZeneca Campaign Lab (`UC4`)** is a **100% generic, brand-agnostic and product-agnostic** creative and scientific campaign production studio deployed on **Vertex AI Agent Engine** and **Gemini Enterprise**.
+**AstraZeneca Campaign Lab** is a **100% generic, brand-agnostic and product-agnostic** creative and scientific campaign production studio deployed on **Vertex AI Agent Engine** and **Gemini Enterprise**.
 
 Unlike product-specific agents, **AstraZeneca Campaign Lab** contains **zero hardcoded product or Calquence assumptions**. It dynamically adapts to any investigational molecule (e.g., `AZD9550`), commercial therapy, disease awareness initiative, or corporate/partner brand theme.
 

@@ -70,6 +70,12 @@ class TestAdkAgentIntegration(unittest.TestCase):
         self.assertEqual(adk_agent.name, "astrazeneca_campaign_lab")
         self.assertGreaterEqual(len(adk_agent.tools), 10)
 
+    def test_deterministic_greeting_response(self) -> None:
+        agent = AstraZenecaCampaignLabADKAgent(session_id="test_greeting_01")
+        reply = agent.interact("Hello")
+        self.assertIn("AstraZeneca Campaign Lab", reply["response"])
+        self.assertNotIn("(UC4)", reply["response"])
+
     def test_signed_url_preflight_and_callback(self) -> None:
         self.assertFalse(verify_signed_url_preflight(""))
         self.assertFalse(verify_signed_url_preflight("https://example.com/unsigned.png"))
@@ -82,3 +88,4 @@ class TestAdkAgentIntegration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

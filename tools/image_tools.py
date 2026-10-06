@@ -97,19 +97,27 @@ def _generate_artistic_4k_canvas(
             project=settings.google_cloud_project,
             location=settings.vertex_global_location,
         )
-        resp = client.models.generate_images(
-            model=settings.gemini_image_model,
-            prompt=prompt,
-            config=types.GenerateImagesConfig(
-                number_of_images=1,
-                aspect_ratio="16:9" if size[0] >= size[1] else "3:4",
-                safety_filter_level="BLOCK_MEDIUM_AND_ABOVE",
-            ),
-        )
-        if resp.generated_images:
-            raw_bytes = resp.generated_images[0].image.image_bytes
-            img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
-            return img.resize(size, Image.Resampling.LANCZOS)
+        for img_model_name in settings.image_model_candidates:
+            try:
+                result = client.models.generate_content(
+                    model=img_model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_modalities=["IMAGE", "TEXT"]
+                    ),
+                )
+                if (
+                    result.candidates
+                    and result.candidates[0].content
+                    and result.candidates[0].content.parts
+                ):
+                    for part in result.candidates[0].content.parts:
+                        if getattr(part, "inline_data", None) and part.inline_data.data:
+                            img = Image.open(io.BytesIO(part.inline_data.data)).convert("RGB")
+                            return img.resize(size, Image.Resampling.LANCZOS)
+            except Exception as model_exc:
+                logger.debug("Image model %s fallback (%s)", img_model_name, model_exc)
+                continue
     except Exception as exc:
         logger.info("Using deterministic 4K studio canvas for prompt (%s)", exc)
 

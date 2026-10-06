@@ -13,11 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Deploy & Update AstraZeneca Campaign Lab (UC4) in Vertex AI Agent Engine (`google-adk`).
+"""Deploy & Update AstraZeneca Campaign Lab in Vertex AI Agent Engine (`google-adk`).
 
-Unified Storage (`gs://astrazeneca-ge-pilot-usecase/UC4/`), Native In-Chat Artifact
-Attachment with GCS Zero-Byte Backfill (`gs://astrazeneca-ge-pilot-usecase/app/`),
-Google Search Grounding, Dynamic Brand Theme Engine, and Verified 7-Day V4 Signed URLs.
+Uses `BaseAgent` with `_run_async_impl` (identical to `UC1` `Calquence Campaign Lab`)
+so that Gemini 3.1 Pro Preview (`gemini-3.1-pro-preview`) and `gemini-3-pro-image`
+are invoked via the `global` Vertex AI endpoint while the Reasoning Engine runs in
+`europe-west1`, with native ADK artifact attachment and 7-day V4 Signed URLs.
 """
 from __future__ import annotations
 
@@ -31,7 +32,7 @@ import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -39,23 +40,27 @@ if str(PROJECT_ROOT) not in sys.path:
 os.chdir(PROJECT_ROOT)
 
 import vertexai
+from google.adk.agents.base_agent import BaseAgent
+from google.adk.agents.callback_context import CallbackContext
+from google.adk.agents.invocation_context import InvocationContext
+from google.adk.events import Event, EventActions
+from google.genai import types
 from PIL import Image
 from vertexai import agent_engines
 from vertexai.agent_engines import AdkApp
-
-from agents.adk_conversational_agent import (
-    AstraZenecaCampaignLabADKAgent,
-    create_campaign_lab_adk_agent,
-    upload_to_gcs,
-)
-from config.settings import get_settings
-from tools.logo_tools import ensure_astrazeneca_logo_assets, render_svg_to_png
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("astrazeneca_campaign_lab.deploy")
+
+CLEAN_AGENT_DESCRIPTION = (
+    "Executive Campaign Partner & autonomous pharmaceutical marketing multi-agent system "
+    "for AstraZeneca. Powered by Gemini 3.1 Pro and Nano Banana Pro (gemini-3-pro-image) "
+    "to generate live 4K campaign visuals, slide decks, agency briefing forms, "
+    "vector clinical charts, information pamphlets, and campaign videos."
+)
 
 
 def _ensure_sys_path() -> None:
@@ -99,14 +104,178 @@ def _build_gcs_artifact_service():
         return InMemoryArtifactService()
 
 
+def preserve_verified_signed_urls_callback(
+    callback_context: Optional[Any] = None,
+    llm_response: Optional[Any] = None,
+    **kwargs: Any,
+) -> Optional[Any]:
+    """Post-model callback that delegates to `agents.adk_conversational_agent.preserve_verified_signed_urls_callback`."""
+    _ensure_sys_path()
+    from agents.adk_conversational_agent import (
+        preserve_verified_signed_urls_callback as _impl,
+    )
+
+    return _impl(
+        callback_context=callback_context,
+        llm_response=llm_response,
+        **kwargs,
+    )
+
+
+class AstraZenecaCampaignLabBaseAgent(BaseAgent):
+    """Google ADK BaseAgent for AstraZeneca Campaign Lab.
+
+    Uses Gemini 3.1 Pro Preview (`gemini-3.1-pro-preview`) on the `global` endpoint,
+    Google Search Grounding, and `gemini-3-pro-image` to generate 4K visuals,
+    widescreen slide decks, extended A4 pamphlets, vector SVG charts, and HD videos.
+    """
+
+    name: str = "astrazeneca_campaign_lab"
+    description: str = CLEAN_AGENT_DESCRIPTION
+    after_model_callback: Any = preserve_verified_signed_urls_callback
+
+    async def _run_async_impl(
+        self, ctx: InvocationContext
+    ) -> AsyncGenerator[Event, None]:
+        _ensure_sys_path()
+        user_text = ""
+        if ctx.user_content and ctx.user_content.parts:
+            for part in ctx.user_content.parts:
+                if getattr(part, "text", None):
+                    user_text += part.text + " "
+                elif getattr(part, "inline_data", None) and part.inline_data.data:
+                    mime = (part.inline_data.mime_type or "").lower()
+                    if "pdf" in mime:
+                        try:
+                            from pypdf import PdfReader
+
+                            reader = PdfReader(io.BytesIO(part.inline_data.data))
+                            pdf_text = "\n".join(
+                                page.extract_text() or "" for page in reader.pages[:20]
+                            )
+                            user_text += (
+                                f"\n[Uploaded PDF Document Content]:\n{pdf_text[:10000]}\n"
+                            )
+                        except Exception as exc:
+                            logger.warning("PDF inline extraction warning: %s", exc)
+        user_text = user_text.strip() or "Hello"
+
+        session_id = getattr(ctx.session, "id", "default") or "default"
+        user_id = (
+            getattr(ctx, "user_id", None)
+            or getattr(ctx.session, "user_id", "default_user")
+            or "default_user"
+        )
+        app_name = getattr(ctx, "app_name", "app") or "app"
+        initial_state = dict(getattr(ctx.session, "state", {}) or {})
+
+        from agents.adk_conversational_agent import (
+            AstraZenecaCampaignLabADKAgent,
+            _infer_mime_type,
+            backfill_gcs_native_artifact,
+            prepare_inline_preview_bytes,
+        )
+        from config.settings import get_settings
+
+        runtime_settings = get_settings()
+        runtime_settings.output_dir.mkdir(parents=True, exist_ok=True)
+        runtime_settings.uploads_dir.mkdir(parents=True, exist_ok=True)
+
+        logger.info(
+            "ADK invocation started | session_id=%s | user_id=%s | user_text_len=%d",
+            session_id,
+            user_id,
+            len(user_text),
+        )
+        event_actions = EventActions(state_delta={}, artifact_delta={})
+        cb_ctx = CallbackContext(ctx, event_actions=event_actions)
+
+        agent = AstraZenecaCampaignLabADKAgent(
+            session_id=session_id,
+            initial_state=initial_state,
+            tool_context=cb_ctx,
+        )
+        result = agent.interact(user_text, tool_context=cb_ctx)
+        response_text = result.get("response", "")
+
+        updated_state = result.get("state", {})
+        state_delta = {
+            "campaign_name": updated_state.get("campaign_name"),
+            "theme_prompt": updated_state.get("theme_prompt"),
+            "master_strapline": updated_state.get("master_strapline"),
+            "video_length_mode": updated_state.get("video_length_mode"),
+            "last_deliverables": updated_state.get("last_deliverables", {}),
+            "verified_signed_urls": updated_state.get("verified_signed_urls", {}),
+            "history": updated_state.get("history", [])[-10:],
+        }
+        event_actions.state_delta.update(state_delta)
+
+        # Attach every generated deliverable as a native ADK artifact + zero-byte GCS backfill
+        turn_artifacts = result.get("turn_artifacts", {}) or {}
+        for _, local_path_str in turn_artifacts.items():
+            file_path = Path(local_path_str)
+            if not file_path.exists():
+                continue
+            filename = file_path.name
+            content_type = _infer_mime_type(file_path)
+            payload_bytes = prepare_inline_preview_bytes(file_path)
+            part = types.Part.from_bytes(
+                data=payload_bytes, mime_type=content_type
+            )
+            version = event_actions.artifact_delta.get(filename, 0)
+            if filename not in event_actions.artifact_delta:
+                try:
+                    version = await cb_ctx.save_artifact(filename, part)
+                except Exception as art_err:
+                    logger.debug(
+                        "ADK save_artifact fallback for %s: %s", filename, art_err
+                    )
+                    version = 0
+                    event_actions.artifact_delta[filename] = version
+
+            backfill_gcs_native_artifact(
+                payload_bytes=payload_bytes,
+                content_type=content_type,
+                filename=filename,
+                version=version,
+                session_id=session_id,
+                user_id=user_id,
+                app_name=app_name,
+            )
+
+        if self.after_model_callback:
+            response_text = self.after_model_callback(
+                callback_context=cb_ctx,
+                llm_response=response_text,
+            )
+
+        yield Event(
+            invocation_id=ctx.invocation_id,
+            author=self.name,
+            branch=ctx.branch,
+            content=types.Content(
+                role="model",
+                parts=[types.Part(text=response_text)],
+            ),
+            actions=event_actions,
+        )
+
+
+root_agent = AstraZenecaCampaignLabBaseAgent(
+    after_model_callback=preserve_verified_signed_urls_callback
+)
+
+
 class AstraZenecaCampaignLabReasoningEngine(AdkApp):
-    """Vertex AI Agent Engine (`google-adk`) for AstraZeneca Campaign Lab (UC4)."""
+    """Vertex AI Agent Engine (`google-adk`) with OpenTelemetry, Cloud Logging & GcsArtifactService."""
 
     agent_framework: str = "google-adk"
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         if "agent" not in kwargs and "app" not in kwargs and not args:
-            kwargs["agent"] = create_campaign_lab_adk_agent()
+            kwargs["agent"] = AstraZenecaCampaignLabBaseAgent(
+                after_model_callback=preserve_verified_signed_urls_callback
+            )
         kwargs.setdefault("app_name", "app")
         kwargs.setdefault("enable_tracing", True)
         kwargs.setdefault(
@@ -134,6 +303,8 @@ class AstraZenecaCampaignLabReasoningEngine(AdkApp):
             logger.debug("Cloud Logging client fallback to standard stdout: %s", log_exc)
 
         super().set_up()
+        from config.settings import get_settings
+
         runtime_settings = get_settings()
         runtime_settings.output_dir.mkdir(parents=True, exist_ok=True)
         runtime_settings.uploads_dir.mkdir(parents=True, exist_ok=True)
@@ -149,20 +320,22 @@ class AstraZenecaCampaignLabReasoningEngine(AdkApp):
 
     def query(
         self,
-        prompt: Optional[str] = "Generate a campaign slide deck and look and feel",
-        campaign_name: str = "Strategic Campaign",
+        prompt: Optional[str] = "Hello",
+        campaign_name: str = "AZD9550 Dual Agonist",
         theme_prompt: str = "astrazeneca_light",
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """Execute synchronous query for direct Python SDK callers."""
         _ensure_sys_path()
+        from agents.adk_conversational_agent import AstraZenecaCampaignLabADKAgent
+
         agent = AstraZenecaCampaignLabADKAgent(
             initial_state={
                 "campaign_name": campaign_name,
                 "theme_prompt": theme_prompt,
             }
         )
-        result = agent.chat(prompt or "Generate a campaign slide deck and look and feel")
+        result = agent.chat(prompt or "Hello")
         return {
             "status": "success",
             "agent_name": "astrazeneca_campaign_lab",
@@ -170,7 +343,6 @@ class AstraZenecaCampaignLabReasoningEngine(AdkApp):
             "service_name": "AstraZeneca Campaign Lab",
             "response": result.get("response", ""),
             "deliverables": result.get("deliverables", {}),
-            "gcs_uploads": result.get("gcs_uploads", {}),
         }
 
 
@@ -179,6 +351,7 @@ def patch_reasoning_engine_framework_and_telemetry(
     env_vars: Dict[str, str],
 ) -> None:
     """Explicitly patch `spec.agent_framework = 'google-adk'` and telemetry env vars."""
+    from config.settings import get_settings
     from google.cloud.aiplatform_v1beta1 import (
         ReasoningEngine as GapicReasoningEngine,
         ReasoningEngineServiceClient,
@@ -219,70 +392,17 @@ def patch_reasoning_engine_framework_and_telemetry(
     )
 
 
-def _find_existing_uc4_reasoning_engine(display_name: str) -> str:
-    """Discover if `AstraZeneca Campaign Lab` already has a Reasoning Engine in Vertex AI."""
-    settings = get_settings()
-    if settings.existing_reasoning_engine_id:
-        if settings.existing_reasoning_engine_id.startswith("projects/"):
-            return settings.existing_reasoning_engine_id
-        return (
-            f"projects/{settings.google_cloud_project_number}/locations/"
-            f"{settings.google_cloud_location}/reasoningEngines/"
-            f"{settings.existing_reasoning_engine_id}"
-        )
-
-    meta_file = PROJECT_ROOT / "deployment_metadata.json"
-    if meta_file.exists():
-        try:
-            meta = json.loads(meta_file.read_text(encoding="utf-8"))
-            if meta.get("reasoning_engine_resource_name"):
-                return meta["reasoning_engine_resource_name"]
-        except Exception:
-            pass
-
-    try:
-        for eng in agent_engines.list():
-            if getattr(eng, "display_name", "") == display_name:
-                return eng.resource_name
-    except Exception as exc:
-        logger.debug("ReasoningEngine list lookup note: %s", exc)
-    return ""
-
-
-def _persist_reasoning_engine_id(resource_name: str) -> None:
-    """Save the provisioned Reasoning Engine resource name to `deployment_metadata.json` and `.env`."""
-    meta_file = PROJECT_ROOT / "deployment_metadata.json"
-    meta_file.write_text(
-        json.dumps(
-            {
-                "service_name": "AstraZeneca Campaign Lab",
-                "gcs_folder_prefix": "UC4",
-                "reasoning_engine_resource_name": resource_name,
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    env_file = PROJECT_ROOT / ".env"
-    if env_file.exists():
-        content = env_file.read_text(encoding="utf-8")
-        if 'EXISTING_REASONING_ENGINE_ID=""' in content:
-            content = content.replace(
-                'EXISTING_REASONING_ENGINE_ID=""',
-                f'EXISTING_REASONING_ENGINE_ID="{resource_name}"',
-            )
-            env_file.write_text(content, encoding="utf-8")
-
-
 def register_agent_in_gemini_enterprise(
     reasoning_engine_resource_name: str,
     display_name: str = "AstraZeneca Campaign Lab",
-    description: str = "",
+    description: str = CLEAN_AGENT_DESCRIPTION,
 ) -> None:
     """Register or update `AstraZeneca Campaign Lab` in Gemini Enterprise with the AstraZeneca Symbol icon."""
     import google.auth
     from google.auth.transport.requests import Request
+    from agents.adk_conversational_agent import upload_to_gcs
+    from config.settings import get_settings
+    from tools.logo_tools import ensure_astrazeneca_logo_assets, render_svg_to_png
 
     settings = get_settings()
     project_number = settings.google_cloud_project_number
@@ -307,7 +427,6 @@ def register_agent_in_gemini_enterprise(
         "astrazeneca_campaign_lab/brand_icons/astrazeneca_symbol_gold.png"
     )
 
-    # 1. Render and encode directly from assets/astrazeneca_logos_svg/AstraZeneca symbol.svg
     try:
         svg_symbol_path = settings.logos_dir / "AstraZeneca symbol.svg"
         png_symbol_path = settings.logos_dir / "astrazeneca_symbol_gold.png"
@@ -344,7 +463,6 @@ def register_agent_in_gemini_enterprise(
     except Exception as icon_exc:
         logger.warning("Local agent icon preparation note: %s", icon_exc)
 
-    # 2. Upload brand icons to unified GCS bucket under UC4/ and generate 7-day V4 Signed URL
     try:
         logos = ensure_astrazeneca_logo_assets()
         for p in logos.values():
@@ -358,7 +476,6 @@ def register_agent_in_gemini_enterprise(
     except Exception as gcs_exc:
         logger.debug("GCS brand icon upload note: %s", gcs_exc)
 
-    # 3. Acquire bearer token (ADC first, fallback to gcloud CLI)
     token = ""
     try:
         creds, _ = google.auth.default(
@@ -428,10 +545,10 @@ def register_agent_in_gemini_enterprise(
                         .get("provisionedReasoningEngine", {})
                         .get("reasoningEngine", "")
                     )
-                    # Strictly match ONLY AstraZeneca Campaign Lab (never touch UC1 Calquence Campaign Lab)
                     if (
                         (reasoning_engine_resource_name and reasoning_engine_resource_name in re_cfg)
                         or ag.get("displayName") == display_name
+                        or "84099737022232589" in ag_name
                     ):
                         primary_icon = (
                             icon_candidates[0][1]
@@ -565,17 +682,17 @@ def deploy(
     icon_only: bool = False,
     artifact_service_uri: Optional[str] = None,
 ):
-    """Deploy or update the AstraZeneca Campaign Lab (UC4) ADK Agent Engine & register in Gemini Enterprise."""
-    settings = get_settings()
-    display_name = settings.service_name
-    description = (
-        "AstraZeneca Campaign Lab (UC4) — Generic multimodal campaign, brand look-and-feel, "
-        "and scientific communications studio with Google Search Grounding, custom brand palette "
-        "engine (Google 4-color, AstraZeneca Light/Dark, or custom Hex/RGB), 4K slide decks, "
-        "extended A4 PDF pamphlets, SVG charts/logos, and short/long 1080p HD videos."
-    )
+    """Deploy or update the AstraZeneca Campaign Lab ADK Agent Engine in-place."""
+    from config.settings import get_settings
 
-    existing_re = _find_existing_uc4_reasoning_engine(display_name)
+    settings = get_settings()
+    display_name = "AstraZeneca Campaign Lab"
+    description = CLEAN_AGENT_DESCRIPTION
+
+    existing_re = (
+        settings.existing_reasoning_engine_id
+        or "projects/726684663091/locations/europe-west1/reasoningEngines/5973077126683820032"
+    )
     project_id = project_id or settings.google_cloud_project
     location = settings.google_cloud_location or "europe-west1"
     artifact_uri = (
@@ -599,8 +716,8 @@ def deploy(
         staging_bucket=staging_bucket,
     )
 
-    if icon_only and existing_re:
-        register_agent_in_gemini_enterprise(existing_re, display_name, description)
+    register_agent_in_gemini_enterprise(existing_re, display_name, description)
+    if icon_only:
         logger.info("Completed --icon-only Gemini Enterprise Agent update.")
         return None
 
@@ -608,11 +725,11 @@ def deploy(
 
     requirements = [
         "google-cloud-aiplatform[adk,agent_engines]>=1.88.0",
-        "google-adk>=1.0.0",
+        "google-adk>=1.5.0",
         "google-cloud-storage>=2.14.0",
         "google-cloud-logging>=3.10.0",
         "google-cloud-texttospeech>=2.21.0",
-        "google-genai>=1.10.0",
+        "google-genai>=2.0.0",
         "pydantic>=2.0.0",
         "pydantic-settings>=2.0.0",
         "python-dotenv>=1.0.1",
@@ -656,41 +773,24 @@ def deploy(
         "SERVICE_NAME": display_name,
     }
 
-    if existing_re:
-        logger.info(
-            "Updating existing UC4 Agent Engine IN-PLACE via vertexai.agent_engines: %s",
-            existing_re,
-        )
-        remote_engine = agent_engines.update(
-            resource_name=existing_re,
-            agent_engine=engine_instance,
-            requirements=requirements,
-            extra_packages=extra_packages,
-            display_name=display_name,
-            description=description,
-            env_vars=env_vars,
-        )
-    else:
-        logger.info(
-            "Creating NEW Vertex AI Agent Engine for '%s' (UC4)...",
-            display_name,
-        )
-        remote_engine = agent_engines.create(
-            agent_engine=engine_instance,
-            requirements=requirements,
-            extra_packages=extra_packages,
-            display_name=display_name,
-            description=description,
-            env_vars=env_vars,
-        )
-
-    _persist_reasoning_engine_id(remote_engine.resource_name)
+    logger.info(
+        "Updating existing Agent Engine IN-PLACE via vertexai.agent_engines: %s",
+        existing_re,
+    )
+    remote_engine = agent_engines.update(
+        resource_name=existing_re,
+        agent_engine=engine_instance,
+        requirements=requirements,
+        extra_packages=extra_packages,
+        display_name=display_name,
+        description=description,
+        env_vars=env_vars,
+    )
     patch_reasoning_engine_framework_and_telemetry(
         remote_engine.resource_name, env_vars
     )
     logger.info(
-        "Successfully deployed '%s' (UC4) with Framework='google-adk' & Telemetry=Enabled: %s",
-        display_name,
+        "Successfully UPDATED Agent Engine in-place with Framework='google-adk' & Telemetry=Enabled: %s",
         remote_engine.resource_name,
     )
     register_agent_in_gemini_enterprise(

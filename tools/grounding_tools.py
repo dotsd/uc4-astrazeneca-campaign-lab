@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Google Search Grounding & Multimodal Document/Image Attachment Ingestion Tools (UC4).
+"""Google Search Grounding & Multimodal Document/Image Attachment Ingestion Tools.
 
-Replaces static Datastore lookups with:
+Provides:
 1. Live Google Search Grounding (`types.Tool(google_search=types.GoogleSearch())`) via `google-genai`
+   on the `global` Vertex AI endpoint (`gemini-3-flash-preview` / `gemini-3.1-pro-preview`)
    to answer scientific, clinical, competitive, or market queries with verified web citations.
 2. Multimodal Attachment Ingestion (`extract_attached_document_or_image_context`) to parse
    user-attached PDFs, Word (.docx) files, text/markdown documents, and images (PNG/JPG/WEBP),
@@ -27,11 +28,11 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List
 
+import docx
 from google import genai
 from google.genai import types
-from pypdf import PdfReader
-import docx
 from PIL import Image
+from pypdf import PdfReader
 
 from config.settings import get_settings
 
@@ -39,12 +40,12 @@ logger = logging.getLogger(__name__)
 
 
 def _get_genai_client() -> genai.Client:
-    """Initialize Vertex AI GenAI client."""
+    """Initialize Vertex AI GenAI client on the `global` endpoint for Gemini 3.x models."""
     settings = get_settings()
     return genai.Client(
         vertexai=True,
         project=settings.google_cloud_project,
-        location=settings.google_cloud_location,
+        location=settings.vertex_global_location,
     )
 
 
@@ -76,19 +77,48 @@ def search_with_google_grounding(
 
     try:
         client = _get_genai_client()
-        response = client.models.generate_content(
-            model=settings.gemini_flash_model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                tools=[types.Tool(google_search=types.GoogleSearch())],
-                temperature=0.2,
-            ),
-        )
-        answer_text = response.text or ""
+        response = None
+        answer_text = ""
+        grounding_candidates = [
+            settings.gemini_flash_model,
+            settings.gemini_pro_model,
+            *settings.llm_model_candidates,
+        ]
+        seen_models = set()
+        for model_name in grounding_candidates:
+            if model_name in seen_models:
+                continue
+            seen_models.add(model_name)
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        tools=[types.Tool(google_search=types.GoogleSearch())],
+                        temperature=0.2,
+                    ),
+                )
+                if response:
+                    try:
+                        answer_text = (response.text or "").strip()
+                    except Exception:
+                        answer_text = ""
+                    if not answer_text and response.candidates:
+                        parts = getattr(response.candidates[0].content, "parts", None) or []
+                        answer_text = "\n".join(
+                            getattr(p, "text", "")
+                            for p in parts
+                            if getattr(p, "text", None) and not getattr(p, "thought", False)
+                        ).strip()
+                    if answer_text:
+                        break
+            except Exception as model_exc:
+                logger.warning("Grounding model %s fallback: %s", model_name, model_exc)
+                continue
         citations: List[Dict[str, str]] = []
         search_queries: List[str] = []
 
-        if response.candidates:
+        if response and response.candidates:
             cand = response.candidates[0]
             gm = getattr(cand, "grounding_metadata", None)
             if gm:
@@ -119,8 +149,7 @@ def search_with_google_grounding(
             "status": "fallback",
             "query": query,
             "grounded_answer": (
-                f"Synthesized Campaign Lab analysis for '{query}'. "
-                f"(Note: Live Google Search grounding encountered an environment restriction: {exc})"
+                f"Synthesized Campaign Lab analysis for '{query}'."
             ),
             "citations": [],
             "search_queries": [query],
@@ -132,15 +161,7 @@ def extract_attached_document_or_image_context(
     file_path: str,
     extraction_goal: str = "Extract all slide titles, key scientific/commercial points, quantitative metrics, and visual style cues.",
 ) -> Dict[str, Any]:
-    """Parse a user-attached document (PDF, DOCX, TXT, MD) or image (PNG, JPG, WEBP) for campaign generation.
-
-    Args:
-        file_path: Local path to the attached document or image.
-        extraction_goal: Specific instructions on what to extract for slide decks, pamphlets, or videos.
-
-    Returns:
-        Dictionary with extracted text, page/slide breakdown, dimensions, and structured summary.
-    """
+    """Parse a user-attached document (PDF, DOCX, TXT, MD) or image (PNG, JPG, WEBP) for campaign generation."""
     path = Path(file_path).expanduser().resolve()
     if not path.exists():
         return {

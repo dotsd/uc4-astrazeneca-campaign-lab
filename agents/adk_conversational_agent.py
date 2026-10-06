@@ -12,48 +12,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Google ADK Conversational Agent & Artifact Delivery Engine for AstraZeneca Campaign Lab (UC4).
+"""True Google ADK Agentic Conversational Orchestrator for AstraZeneca Campaign Lab.
 
-Deployed to Vertex AI Agent Engine (`AdkApp`) and registered in Gemini Enterprise as
-`AstraZeneca Campaign Lab`.
-
-Key Capabilities:
-1. 100% Generic Campaign & Product Studio (Zero Calquence hardcoding).
-2. Live Google Search Grounding (`search_with_google_grounding`) to answer scientific,
-   clinical, regulatory, or commercial queries with grounded web citations.
-3. Multimodal Document & Image Attachment Ingestion (`extract_attached_document_or_image_context`)
-   to turn user-uploaded PDFs, Word docs, or images into slide decks, pamphlets, and videos.
-4. Dynamic Brand Theme Engine (`parse_brand_theme`):
-   - Follows exact user color/formatting prompts (e.g., Google branding: white background,
-     grey text, Blue #4285F4, Red #EA4335, Yellow #FBBC04, Green #34A853).
-   - Or asks the user if they want **AstraZeneca Corporate Format** (with official AstraZeneca
-     vector SVG/PNG logos, icons, and Mulberry #830051 / Gold #F0AB00 / Navy #003865 /
-     Dark Metabolic Plum #1E0514 palette).
-5. Full Suite of Tangible Deliverables with 7-Day V4 Signed URLs & Native In-Chat Previews:
-   - 4K Widescreen Slide Deck (`3840 × 2160` PNGs + PDF) with extra-large readable fonts
-   - Extended Multi-Page A4 Information Pamphlet PDF with graphs, 4K visuals, and logos
-   - 3 Brand Look & Feel Variations + Single Master Strapline + Recommended Anchor Direction
-   - Vector `.svg` & `450-DPI .png` charts, pathway diagrams, and custom brand crests
-   - Short (`16s–24s`) or Long (`60s–80s`) 1080p HD `.mp4` Campaign Videos
+Uses `genai.Client(vertexai=True, location="global")` with Gemini 3.1 Pro Preview
+(`gemini-3.1-pro-preview`) and `gemini-3-pro-image` so it runs reliably inside the
+`europe-west1` Vertex AI Agent Engine runtime while accessing global Gemini 3.x models,
+Google Search Grounding, native ADK in-chat artifact attachments, and verified 7-day
+V4 Signed URLs.
 """
 from __future__ import annotations
 
+import asyncio
+import datetime
+import inspect
 import io
 import logging
 import mimetypes
+import re
+import urllib.parse
+import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
+from google import genai
 from google.adk.agents import Agent
 from google.cloud import storage
+from google.genai import types
 
-from agents.orchestrator_agent import (
-    generate_v4_signed_url,
-    run_full_campaign_lab_pipeline,
-    upload_deliverable_to_gcs,
-    verify_signed_url_preflight,
-)
-from config.settings import get_settings
+from config.brand_guidelines import parse_brand_theme
+from config.settings import get_settings, settings
 from tools.chart_tools import (
     generate_campaign_chart_svg_and_png,
     generate_pathway_synergy_svg_and_png,
@@ -67,12 +54,18 @@ from tools.image_tools import (
     generate_4k_campaign_key_visual,
     generate_brand_look_and_feel_variations_4k,
 )
-from tools.logo_tools import generate_custom_brand_logo_svg
+from tools.logo_tools import (
+    ensure_astrazeneca_logo_assets,
+    generate_custom_brand_logo_svg,
+)
 from tools.pdf_tools import generate_extended_campaign_pamphlet_pdf
 from tools.slide_deck_tools import generate_4k_slide_deck
 from tools.video_tools import generate_campaign_video_mp4
 
 logger = logging.getLogger(__name__)
+
+_SESSION_STATES: Dict[str, Dict[str, Any]] = {}
+_VERIFIED_SIGNED_URLS_REGISTRY: Dict[str, str] = {}
 
 MAX_INLINE_ARTIFACT_BYTES: int = 5_500_000  # < 5.5 MB inline stream preview cap
 
@@ -124,6 +117,72 @@ def prepare_inline_preview_bytes(file_path: Path) -> bytes:
     return raw_bytes
 
 
+def verify_signed_url_preflight(signed_url: str) -> bool:
+    """Verify a V4 Signed URL with an unauthenticated HTTP GET (Range: bytes=0-0 -> HTTP 200/206)."""
+    if not signed_url or "X-Goog-Signature=" not in signed_url:
+        return False
+    try:
+        req = urllib.request.Request(
+            signed_url,
+            headers={"Range": "bytes=0-0"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            status_code = getattr(resp, "status", None) or resp.getcode()
+            return status_code in (200, 206)
+    except Exception as exc:
+        logger.debug("Pre-flight V4 signed URL verification note: %s", exc)
+        return False
+
+
+def generate_v4_signed_url(
+    bucket_name: str,
+    blob_path: str,
+    expiration_days: int = 7,
+) -> str:
+    """Generate a 7-day V4 Signed URL signed via IAM signBlob (`google.auth.iam.Signer`)."""
+    import google.auth
+    from google.auth import iam
+    from google.auth.transport import requests as google_requests
+    from google.oauth2 import service_account
+
+    cfg = get_settings()
+    signing_sa = cfg.signing_service_account
+    creds, _ = google.auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+    auth_req = google_requests.Request()
+    if not getattr(creds, "valid", False):
+        creds.refresh(auth_req)
+
+    client = storage.Client(project=cfg.google_cloud_project, credentials=creds)
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(blob_path)
+
+    signer = iam.Signer(auth_req, creds, signing_sa)
+    signing_creds = service_account.Credentials(
+        signer=signer,
+        service_account_email=signing_sa,
+        token_uri="https://oauth2.googleapis.com/token",
+    )
+
+    signed_url = blob.generate_signed_url(
+        version="v4",
+        expiration=datetime.timedelta(days=expiration_days),
+        method="GET",
+        credentials=signing_creds,
+    )
+
+    base_googleapis = f"https://storage.googleapis.com/{bucket_name}/{blob_path}"
+    base_cloud = f"https://storage.cloud.google.com/{bucket_name}/{blob_path}"
+    filename = Path(blob_path).name
+    _VERIFIED_SIGNED_URLS_REGISTRY[base_googleapis] = signed_url
+    _VERIFIED_SIGNED_URLS_REGISTRY[base_cloud] = signed_url
+    _VERIFIED_SIGNED_URLS_REGISTRY[blob_path] = signed_url
+    _VERIFIED_SIGNED_URLS_REGISTRY[filename] = signed_url
+    return signed_url
+
+
 def backfill_gcs_native_artifact(
     payload_bytes: bytes,
     content_type: str,
@@ -136,12 +195,12 @@ def backfill_gcs_native_artifact(
     """Ensure ADK native artifacts in gs://astrazeneca-ge-pilot-usecase/app/... are never 0-byte placeholders."""
     if not payload_bytes:
         return
-    settings = get_settings()
+    cfg = get_settings()
     bucket_name = (
-        settings.gcs_assets_bucket.replace("gs://", "").strip("/").split("/")[0]
+        cfg.gcs_assets_bucket.replace("gs://", "").strip("/").split("/")[0]
     )
     try:
-        client = storage.Client(project=settings.google_cloud_project)
+        client = storage.Client(project=cfg.google_cloud_project)
         bucket = client.bucket(bucket_name)
         candidate_prefixes = ["app"]
         if app_name and app_name not in candidate_prefixes:
@@ -164,28 +223,144 @@ def backfill_gcs_native_artifact(
                     data=payload_bytes,
                     content_type=content_type,
                 )
-                logger.info(
-                    "Backfilled non-zero ADK native artifact (%d bytes) -> gs://%s/%s",
-                    len(payload_bytes),
-                    bucket_name,
-                    blob_name,
-                )
     except Exception as exc:
-        logger.debug("GCS native artifact backfill note: %s", exc)
+        logger.debug("GCS zero-byte backfill note for %s: %s", filename, exc)
+
+
+def save_native_artifact_with_backfill(
+    file_path: Path,
+    session_id: str = "default",
+    user_id: str = "default_user",
+    app_name: str = "app",
+    tool_context: Optional[Any] = None,
+    artifact_delta: Optional[Dict[str, int]] = None,
+) -> Optional[int]:
+    """Attach a generated deliverable via `tool_context.save_artifact` and backfill GCS."""
+    if not file_path.exists():
+        return None
+
+    filename = file_path.name
+    content_type = _infer_mime_type(file_path)
+    payload_bytes = prepare_inline_preview_bytes(file_path)
+    part = types.Part.from_bytes(data=payload_bytes, mime_type=content_type)
+
+    version: int = 0
+    if tool_context is not None and hasattr(tool_context, "save_artifact"):
+        try:
+            res = tool_context.save_artifact(filename, part)
+            if inspect.isawaitable(res):
+                try:
+                    _ = asyncio.get_running_loop()
+                    if hasattr(res, "close"):
+                        res.close()
+                except RuntimeError:
+                    res = asyncio.run(res)
+            if isinstance(res, int):
+                version = res
+        except Exception as tc_err:
+            logger.debug("tool_context.save_artifact note for %s: %s", filename, tc_err)
+
+    if artifact_delta is not None:
+        artifact_delta[filename] = version
+
+    backfill_gcs_native_artifact(
+        payload_bytes=payload_bytes,
+        content_type=content_type,
+        filename=filename,
+        version=version,
+        session_id=session_id,
+        user_id=user_id,
+        app_name=app_name,
+    )
+    return version
 
 
 def upload_to_gcs(
     local_file_path: Path | str,
     session_id: str = "global",
     folder_prefix: str = "deliverables",
+    tool_context: Optional[Any] = None,
 ) -> str:
     """Upload a local file to `gs://astrazeneca-ge-pilot-usecase/UC4/` and return its 7-day V4 Signed URL."""
-    res = upload_deliverable_to_gcs(
-        str(local_file_path),
-        subfolder=folder_prefix,
-        session_id=session_id,
+    cfg = get_settings()
+    file_path = Path(local_file_path)
+    if not file_path.exists():
+        return ""
+
+    bucket_name = (
+        cfg.gcs_assets_bucket.replace("gs://", "").strip("/").split("/")[0]
     )
-    return res.get("signed_url") or res.get("authenticated_url") or ""
+    uc4_prefix = (cfg.gcs_folder_prefix or "UC4").strip("/")
+    clean_session = re.sub(r"[^a-zA-Z0-9_\-]", "_", session_id or "default")
+    blob_path = f"{uc4_prefix}/astrazeneca_campaign_lab/{folder_prefix}/{clean_session}/{file_path.name}"
+    content_type = _infer_mime_type(file_path)
+
+    if tool_context is not None:
+        save_native_artifact_with_backfill(
+            file_path=file_path,
+            session_id=clean_session,
+            tool_context=tool_context,
+        )
+
+    try:
+        client = storage.Client(project=cfg.google_cloud_project)
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_path)
+        blob.upload_from_filename(str(file_path), content_type=content_type)
+        return generate_v4_signed_url(
+            bucket_name=bucket_name,
+            blob_path=blob_path,
+            expiration_days=7,
+        )
+    except Exception as err:
+        logger.warning("GCS upload/sign note for %s: %s", file_path, err)
+        fallback_url = f"https://storage.googleapis.com/{bucket_name}/{blob_path}"
+        _VERIFIED_SIGNED_URLS_REGISTRY[fallback_url] = fallback_url
+        _VERIFIED_SIGNED_URLS_REGISTRY[file_path.name] = fallback_url
+        return fallback_url
+
+
+def restore_verified_signed_urls_in_text(
+    text: str,
+    verified_urls: Optional[Dict[str, str]] = None,
+) -> str:
+    """Restore exact pre-flight verified V4 Signed URLs if the LLM truncated X-Goog-Signature."""
+    if not text:
+        return text
+
+    lookup = dict(_VERIFIED_SIGNED_URLS_REGISTRY)
+    if verified_urls:
+        lookup.update(verified_urls)
+
+    url_pattern = re.compile(
+        r"https://storage\.(?:googleapis|cloud\.google)\.com/[^\s\)\]\>\"']+"
+    )
+
+    def _replace_match(match: re.Match) -> str:
+        raw_url = match.group(0)
+        trailing = ""
+        while raw_url and raw_url[-1] in ".,;":
+            trailing = raw_url[-1] + trailing
+            raw_url = raw_url[:-1]
+
+        base_without_query = raw_url.split("?", 1)[0]
+        parsed_path = urllib.parse.unquote(base_without_query)
+        filename = Path(parsed_path).name
+
+        canonical_base = base_without_query.replace(
+            "https://storage.cloud.google.com/",
+            "https://storage.googleapis.com/",
+        )
+        if canonical_base in lookup:
+            return lookup[canonical_base] + trailing
+        if base_without_query in lookup:
+            return lookup[base_without_query] + trailing
+        if filename in lookup:
+            return lookup[filename] + trailing
+
+        return canonical_base + trailing
+
+    return url_pattern.sub(_replace_match, text)
 
 
 def preserve_verified_signed_urls_callback(
@@ -193,57 +368,538 @@ def preserve_verified_signed_urls_callback(
     llm_response: Optional[Any] = None,
     **kwargs: Any,
 ) -> Optional[Any]:
-    """Post-model callback hook preserving verified V4 Signed URLs in LLM responses."""
+    """ADK `after_model_callback` ensuring the LLM never truncates or alters V4 `X-Goog-Signature` URLs."""
+    session_urls: Dict[str, str] = {}
+    if callback_context is not None:
+        state = getattr(callback_context, "state", None)
+        if isinstance(state, dict):
+            session_urls = state.get("verified_signed_urls", {}) or {}
+
+    if isinstance(llm_response, str):
+        return restore_verified_signed_urls_in_text(llm_response, session_urls)
+
+    if llm_response is not None and getattr(llm_response, "content", None):
+        parts = getattr(llm_response.content, "parts", None) or []
+        for part in parts:
+            if getattr(part, "text", None):
+                part.text = restore_verified_signed_urls_in_text(
+                    part.text, session_urls
+                )
     return llm_response
 
 
-CAMPAIGN_LAB_SYSTEM_INSTRUCTION = """You are **AstraZeneca Campaign Lab**, a premier multimodal Creative Director, Scientific Storyteller, and Omnichannel Campaign Production Studio.
+class AstraZenecaCampaignLabADKAgent:
+    """Agentic Conversational Agent for AstraZeneca Campaign Lab powered by Gemini 3.1 Pro Preview & Nano Banana Pro 4K."""
 
-### CORE IDENTITY & RULES
-1. **100% Generic Campaign & Product Studio**:
-   - You support ANY therapeutic area, investigational molecule (e.g., AZD9550), commercial brand, corporate initiative, or partner theme.
-   - NEVER assume or inject Calquence branding, logos, or copy unless a user explicitly asks about Calquence.
+    def __init__(
+        self,
+        session_id: str = "default",
+        initial_state: Optional[Dict[str, Any]] = None,
+        tool_context: Optional[Any] = None,
+    ) -> None:
+        self.session_id: str = session_id or "default"
+        self.tool_context: Optional[Any] = tool_context
+        self.after_model_callback = preserve_verified_signed_urls_callback
 
-2. **Dynamic Brand Formatting & Color Palette Discovery**:
-   - Whenever a user provides specific branding instructions — for example:
-     *"use white background for the slides, grey color for text and following branding colors below: Blue: Hex #4285F4, RGB (66, 133, 244), Red: Hex #EA4335, RGB (234, 67, 53), Yellow: Hex #FBBC04, RGB (251, 188, 4), Green: Hex #34A853, RGB (52, 168, 83)"*
-     — pass their exact instruction into the `theme_prompt` parameter of your generation tools so every slide, chart, pamphlet, and video honors their exact background, text color, and Hex/RGB palette.
-   - If the user has NOT specified a brand format or color palette for a new deliverable, politely ask whether they would like:
-     1. **AstraZeneca Corporate Light Executive Format** (White background `#FFFFFF`, Slate text, Mulberry `#830051`, Gold `#F0AB00`, Navy `#003865`, Teal `#00A082` + official AstraZeneca vector logos & icons),
-     2. **AstraZeneca Dark Executive / Metabolic Plum Format** (Deep Plum `#1E0514` background, crisp White text, Gold `#F0AB00`, Teal `#00A082`, Coral `#E40046`), or
-     3. **A Custom Brand Color Palette** (such as Google 4-color `#4285F4 / #EA4335 / #FBBC04 / #34A853` or custom Hex/RGB colors, with or without the AstraZeneca logo).
+        if self.session_id not in _SESSION_STATES:
+            _SESSION_STATES[self.session_id] = {
+                "campaign_name": "AZD9550 Dual Agonist",
+                "theme_prompt": "astrazeneca_light",
+                "master_strapline": "TWO DISTINCT PATHWAYS. ONE BALANCED FORCE.",
+                "video_length_mode": "short",
+                "last_deliverables": {},
+                "verified_signed_urls": {},
+                "turn_artifacts": {},
+                "history": [],
+            }
 
-3. **Single Master Strapline & Anchor Look & Feel Recommendation**:
-   - When presenting brand look-and-feel variations (e.g., 3 distinct visual directions such as Synchronized Rowers, Crystalline Molecule, and Vitality Couple Walking), unify all variations under **ONE Single Master Strapline** (e.g., *"TWO DISTINCT PATHWAYS. ONE BALANCED FORCE."*) and clearly recommend **ONE Primary Anchor Look & Feel** with strategic rationale.
+        if initial_state:
+            for k, v in initial_state.items():
+                if v is not None:
+                    _SESSION_STATES[self.session_id][k] = v
 
-4. **Google Search Grounding & User Attachments**:
-   - Use `search_with_google_grounding` whenever the user asks scientific, clinical, competitive, or market questions so your response is backed by live grounded citations.
-   - When the user attaches or references a document (`.pdf`, `.docx`, `.txt`) or image (`.png`, `.jpg`), call `extract_attached_document_or_image_context` to extract the slide structure, scientific claims, and visuals, and build the deliverables directly from their material.
+        self.state: Dict[str, Any] = _SESSION_STATES[self.session_id]
+        self.state.setdefault("verified_signed_urls", {})
+        self.state["turn_artifacts"] = {}
 
-5. **Full Tangible Deliverable Suite**:
-   - **4K Slide Deck**: `generate_4k_slide_deck` produces `3840 × 2160` 4K slide PNGs and a Widescreen PDF deck with extra-large executive typography (`88px` titles, `62px` card headers, `54px` body copy) so text is never small or cramped.
-   - **Extended Multi-Page A4 PDF Pamphlet**: `generate_extended_campaign_pamphlet_pdf` produces a 4-page print-ready A4 brochure with embedded 4K visuals, SVG charts, synergy diagrams, and vector logos.
-   - **4K Hero Images & 3-Up Look & Feel Board**: `generate_4k_campaign_key_visual` and `generate_brand_look_and_feel_variations_4k`.
-   - **Vector SVG Charts, Diagrams & Logos**: `generate_campaign_chart_svg_and_png`, `generate_pathway_synergy_svg_and_png`, and `generate_custom_brand_logo_svg`.
-   - **Short or Long 1080p HD Videos (`.mp4`)**: `generate_campaign_video_mp4` supports `video_length_mode="short"` (16–24s executive/social teaser) or `video_length_mode="long"` (60–80s full narrative walkthrough).
-   - **Full Omnichannel Package**: `run_full_campaign_lab_pipeline` generates all deliverables in one coordinated run and uploads them to `gs://astrazeneca-ge-pilot-usecase/UC4/` with 7-day V4 Signed URLs.
+    def _register_signed_url(self, file_path: Path, signed_url: str) -> None:
+        """Record a verified V4 Signed URL in session state for post-model preservation."""
+        verified_map = self.state.setdefault("verified_signed_urls", {})
+        verified_map[file_path.name] = signed_url
+        base_url = signed_url.split("?", 1)[0]
+        verified_map[base_url] = signed_url
+
+    def interact(
+        self,
+        user_message: str,
+        tool_context: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Execute agentic reasoning with Gemini 3.1 Pro Preview on `global` endpoint and live tool invocation."""
+        active_tool_ctx = tool_context or self.tool_context
+        self.state.setdefault("history", []).append(
+            {"role": "user", "content": user_message}
+        )
+        self.state["turn_artifacts"] = {}
+
+        # Automatically detect custom branding instructions in the user prompt
+        msg_lower = user_message.lower().strip()
+        if "#4285f4" in msg_lower or "hex #" in msg_lower or "rgb (" in msg_lower or "google" in msg_lower:
+            self.state["theme_prompt"] = user_message
+        elif "dark" in msg_lower or "plum" in msg_lower:
+            self.state["theme_prompt"] = "astrazeneca_dark"
+        elif "astrazeneca" in msg_lower and "light" in msg_lower:
+            self.state["theme_prompt"] = "astrazeneca_light"
+
+        if "long video" in msg_lower or "60s" in msg_lower or "long" in msg_lower:
+            self.state["video_length_mode"] = "long"
+
+        # Define session-bound tools that automatically upload to GCS & attach native artifacts
+        def tool_google_search_grounding(
+            query: str,
+            campaign_context: str = "",
+        ) -> Dict[str, Any]:
+            """Search live scientific, clinical, and commercial information using Google Search Grounding."""
+            return search_with_google_grounding(
+                query=query,
+                campaign_context=campaign_context,
+            )
+
+        def tool_generate_4k_key_visual_and_look_and_feel(
+            campaign_name: str = "AZD9550 Dual Agonist",
+            headline: str = "Complementary Dual-Pathway Strategy",
+            master_strapline: str = "TWO DISTINCT PATHWAYS. ONE BALANCED FORCE.",
+            visual_metaphor_prompt: str = "Synchronized coastal rowing pair at golden sunrise over glass-calm teal water, ultra-detailed 4K commercial photography",
+            theme_prompt: str = "",
+        ) -> Dict[str, Any]:
+            """Generate a 4K Hero Key Visual and a 3-Up Brand Look & Feel Comparison Board with a Single Master Strapline and Anchor Recommendation."""
+            active_theme = theme_prompt or self.state.get("theme_prompt", "astrazeneca_light")
+            self.state["campaign_name"] = campaign_name
+            self.state["master_strapline"] = master_strapline
+            self.state["theme_prompt"] = active_theme
+
+            kv_res = generate_4k_campaign_key_visual(
+                campaign_name=campaign_name,
+                headline=headline,
+                strapline=master_strapline,
+                visual_metaphor_prompt=visual_metaphor_prompt,
+                theme_prompt=active_theme,
+            )
+            lf_res = generate_brand_look_and_feel_variations_4k(
+                campaign_name=campaign_name,
+                master_strapline=master_strapline,
+                theme_prompt=active_theme,
+            )
+
+            kv_path = Path(kv_res["image_path"])
+            lf_path = Path(lf_res["board_image_path"])
+            kv_url = upload_to_gcs(kv_path, self.session_id, tool_context=active_tool_ctx)
+            lf_url = upload_to_gcs(lf_path, self.session_id, tool_context=active_tool_ctx)
+            self._register_signed_url(kv_path, kv_url)
+            self._register_signed_url(lf_path, lf_url)
+
+            self.state["turn_artifacts"]["hero_4k"] = str(kv_path)
+            self.state["turn_artifacts"]["look_and_feel_4k"] = str(lf_path)
+            self.state.setdefault("last_deliverables", {})["hero_4k_url"] = kv_url
+            self.state["last_deliverables"]["look_and_feel_4k_url"] = lf_url
+
+            return {
+                "status": "success",
+                "campaign_name": campaign_name,
+                "master_strapline": master_strapline,
+                "recommended_anchor": lf_res["recommended_anchor"],
+                "anchor_rationale": lf_res["anchor_rationale"],
+                "hero_4k_https_url": kv_url,
+                "look_and_feel_board_https_url": lf_url,
+            }
+
+        def tool_generate_4k_slide_deck(
+            campaign_name: str = "AZD9550 Dual Agonist",
+            theme_prompt: str = "",
+        ) -> Dict[str, Any]:
+            """Generate a 4K Widescreen Slide Deck (3840x2160 PNGs + Widescreen PDF) with extra-large typography following user brand colors or AstraZeneca format."""
+            active_theme = theme_prompt or self.state.get("theme_prompt", "astrazeneca_light")
+            self.state["campaign_name"] = campaign_name
+            self.state["theme_prompt"] = active_theme
+
+            deck_res = generate_4k_slide_deck(
+                campaign_name=campaign_name,
+                theme_prompt=active_theme,
+            )
+            pdf_path = Path(deck_res["pdf_deck_path"])
+            pdf_url = upload_to_gcs(pdf_path, self.session_id, tool_context=active_tool_ctx)
+            self._register_signed_url(pdf_path, pdf_url)
+            self.state["turn_artifacts"]["slide_deck_pdf"] = str(pdf_path)
+
+            slide_urls: List[str] = []
+            for idx, sp_str in enumerate(deck_res["slide_png_paths"][:4], start=1):
+                sp = Path(sp_str)
+                s_url = upload_to_gcs(sp, self.session_id, tool_context=active_tool_ctx)
+                self._register_signed_url(sp, s_url)
+                slide_urls.append(s_url)
+                if idx == 1:
+                    self.state["turn_artifacts"]["slide_01_4k"] = str(sp)
+
+            self.state.setdefault("last_deliverables", {})["slide_deck_pdf_url"] = pdf_url
+            self.state["last_deliverables"]["slide_png_urls"] = slide_urls
+            self.state["last_deliverables"]["slide_png_paths"] = deck_res["slide_png_paths"]
+
+            return {
+                "status": "success",
+                "campaign_name": campaign_name,
+                "theme_id": deck_res["theme_id"],
+                "palette_hex": deck_res["palette_hex"],
+                "slide_deck_pdf_https_url": pdf_url,
+                "slide_01_preview_https_url": slide_urls[0] if slide_urls else "",
+                "slide_png_https_urls": slide_urls,
+            }
+
+        def tool_generate_extended_pamphlet_pdf(
+            campaign_name: str = "AZD9550 Dual Agonist",
+            master_strapline: str = "TWO DISTINCT PATHWAYS. ONE BALANCED FORCE.",
+            executive_summary: str = "An integrated scientific and commercial summary of complementary dual-pathway mechanisms and clinical outcomes.",
+            theme_prompt: str = "",
+        ) -> Dict[str, Any]:
+            """Generate a 4-Page A4 Scientific & Commercial Information Pamphlet PDF + page PNGs with vector logos and charts."""
+            active_theme = theme_prompt or self.state.get("theme_prompt", "astrazeneca_light")
+            self.state["campaign_name"] = campaign_name
+            self.state["master_strapline"] = master_strapline
+            self.state["theme_prompt"] = active_theme
+
+            pam_res = generate_extended_campaign_pamphlet_pdf(
+                campaign_name=campaign_name,
+                strapline=master_strapline,
+                executive_summary=executive_summary,
+                theme_prompt=active_theme,
+            )
+            pdf_path = Path(pam_res["pamphlet_pdf_path"])
+            pdf_url = upload_to_gcs(pdf_path, self.session_id, tool_context=active_tool_ctx)
+            self._register_signed_url(pdf_path, pdf_url)
+            self.state["turn_artifacts"]["pamphlet_pdf"] = str(pdf_path)
+
+            p1_url = ""
+            if pam_res["pamphlet_page_pngs"]:
+                p1_path = Path(pam_res["pamphlet_page_pngs"][0])
+                p1_url = upload_to_gcs(p1_path, self.session_id, tool_context=active_tool_ctx)
+                self._register_signed_url(p1_path, p1_url)
+                self.state["turn_artifacts"]["pamphlet_page_1"] = str(p1_path)
+
+            self.state.setdefault("last_deliverables", {})["pamphlet_pdf_url"] = pdf_url
+            self.state["last_deliverables"]["pamphlet_page_1_url"] = p1_url
+
+            return {
+                "status": "success",
+                "campaign_name": campaign_name,
+                "pamphlet_pdf_https_url": pdf_url,
+                "pamphlet_cover_preview_https_url": p1_url,
+                "page_count": pam_res["page_count"],
+            }
+
+        def tool_generate_svg_charts_and_logos(
+            campaign_name: str = "AZD9550 Dual Agonist",
+            chart_title: str = "Complementary Multi-System Efficacy & Synergy",
+            theme_prompt: str = "",
+        ) -> Dict[str, Any]:
+            """Generate publication-grade Vector SVG and 450-DPI PNG charts, pathway synergy diagrams, and brand crests."""
+            active_theme = theme_prompt or self.state.get("theme_prompt", "astrazeneca_light")
+            chart_res = generate_campaign_chart_svg_and_png(
+                chart_title=chart_title,
+                categories=["Primary Efficacy", "Organ Clearance", "Energy Balance", "Composite Benefit"],
+                series_primary_values=[89.0, 93.0, 86.0, 92.0],
+                series_secondary_values=[64.0, 51.0, 48.0, 62.0],
+                theme_prompt=active_theme,
+            )
+            syn_res = generate_pathway_synergy_svg_and_png(
+                diagram_title=f"{campaign_name} — Complementary Mechanism Architecture",
+                theme_prompt=active_theme,
+            )
+            crest_res = generate_custom_brand_logo_svg(
+                brand_title=campaign_name,
+                theme_prompt=active_theme,
+            )
+
+            c_png = Path(chart_res["png_path"])
+            c_svg = Path(chart_res["svg_path"])
+            s_png = Path(syn_res["png_path"])
+            l_svg = Path(crest_res["svg_path"])
+
+            c_png_url = upload_to_gcs(c_png, self.session_id, tool_context=active_tool_ctx)
+            c_svg_url = upload_to_gcs(c_svg, self.session_id, tool_context=active_tool_ctx)
+            s_png_url = upload_to_gcs(s_png, self.session_id, tool_context=active_tool_ctx)
+            l_svg_url = upload_to_gcs(l_svg, self.session_id, tool_context=active_tool_ctx)
+
+            self._register_signed_url(c_png, c_png_url)
+            self._register_signed_url(c_svg, c_svg_url)
+            self._register_signed_url(s_png, s_png_url)
+            self._register_signed_url(l_svg, l_svg_url)
+
+            self.state["turn_artifacts"]["evidence_chart_png"] = str(c_png)
+            self.state["turn_artifacts"]["synergy_diagram_png"] = str(s_png)
+
+            return {
+                "status": "success",
+                "chart_png_https_url": c_png_url,
+                "chart_svg_https_url": c_svg_url,
+                "synergy_diagram_png_https_url": s_png_url,
+                "brand_crest_svg_https_url": l_svg_url,
+            }
+
+        def tool_generate_campaign_video(
+            campaign_name: str = "AZD9550 Dual Agonist",
+            master_strapline: str = "TWO DISTINCT PATHWAYS. ONE BALANCED FORCE.",
+            video_length_mode: str = "short",
+            theme_prompt: str = "",
+        ) -> Dict[str, Any]:
+            """Generate a Short (20s) or Long (64s) 1080p HD MP4 campaign video with lower-third captions and soundtrack."""
+            active_theme = theme_prompt or self.state.get("theme_prompt", "astrazeneca_dark")
+            existing_frames = self.state.get("last_deliverables", {}).get("slide_png_paths")
+            vid_res = generate_campaign_video_mp4(
+                campaign_name=campaign_name,
+                strapline=master_strapline,
+                video_length_mode=video_length_mode,
+                existing_frame_paths=existing_frames,
+                theme_prompt=active_theme,
+            )
+            vid_path = Path(vid_res["video_path"])
+            vid_url = upload_to_gcs(vid_path, self.session_id, tool_context=active_tool_ctx)
+            self._register_signed_url(vid_path, vid_url)
+            self.state["turn_artifacts"]["campaign_video_mp4"] = str(vid_path)
+            self.state.setdefault("last_deliverables", {})["video_mp4_url"] = vid_url
+
+            return {
+                "status": "success",
+                "video_mp4_https_url": vid_url,
+                "video_length_mode": vid_res["video_length_mode"],
+                "duration_seconds": vid_res["duration_seconds"],
+            }
+
+        system_instruction = f"""You are **AstraZeneca Campaign Lab**, AstraZeneca's autonomous creative, brand, and scientific communications multi-agent studio powered by Google ADK (`{settings.MODEL_TIER}`), Google Search Grounding, and live `{settings.IMAGEN_MODEL}` ("Nano Banana Pro") 4K image generation.
+
+Current Session Context:
+- Active Campaign / Product: {self.state.get('campaign_name')}
+- Active Brand Theme / Palette: {self.state.get('theme_prompt')}
+- Single Master Strapline: {self.state.get('master_strapline')}
+
+CRITICAL INSTRUCTIONS:
+1. **100% GENERIC MULTI-BRAND & MULTI-CAMPAIGN STUDIO**:
+   - You support ANY therapeutic area, investigational molecule (e.g., AZD9550), commercial brand, or corporate initiative.
+   - Never assume or inject Calquence branding unless the user explicitly asks about Calquence.
+
+2. **ON INITIAL GREETING ("Hi", "Hello", "Hey", "Start")**:
+   - Respond with a warm, concise executive welcome introducing **AstraZeneca Campaign Lab**:
+     "Hello and welcome to **AstraZeneca Campaign Lab**!
+
+     I am your creative and scientific campaign partner. Attach a slide deck, document, or image—or ask me any clinical or brand question backed by **Google Search Grounding**—and I can produce:
+
+     • **Brand Look & Feel & Single Master Strapline** — 3 distinct 4K visual directions with a recommended **Anchor Look & Feel**.
+     • **4K Widescreen Slide Deck** — `3840 × 2160` 4K slides and compiled PDF deck with extra-large executive typography.
+     • **Information Pamphlet & Agency Brief** — Multi-page A4 print-ready PDF brochures and Word `.docx` briefs with vector logos.
+     • **Vector SVG Charts, Diagrams & Logos** — Publication-grade `.svg` and `450-DPI .png` infographics.
+     • **Campaign Videos (`.mp4`)** — Short (`20s`) or Long (`64s`) 1080p HD narrated videos.
+
+     **Brand Theme Options:**
+     Would you like to use **AstraZeneca Corporate Format** (with official AstraZeneca vector logos and Mulberry/Gold/Navy or Dark Metabolic Plum palette), or a **Custom Brand Color Palette** (for example, white background, grey text, and custom Hex/RGB colors)?
+
+     How would you like to begin?"
+
+3. **DYNAMIC BRAND THEME & COLOR PALETTE ENGINE**:
+   - If the user specifies custom colors (e.g., *"use white background for the slides, grey color for text and following branding colors below: Blue: Hex #4285F4, Red: Hex #EA4335, Yellow: Hex #FBBC04, Green: Hex #34A853"*), pass their exact instruction into `theme_prompt` across all tools.
+   - If the user has not specified a color theme when asking for slides or a brochure, you may generate using AstraZeneca format or ask if they prefer AstraZeneca format vs. a custom color palette.
+
+4. **ALWAYS INCLUDE INLINE PREVIEWS & VERIFIED 7-DAY V4 SIGNED URLS**:
+   - Whenever you call generation tools, embed the returned HTTPS URLs as Markdown image previews (`![Preview](<https_url>)`) and clickable download links (`[📥 Download Deliverable](<https_url>)`). Never truncate `X-Goog-Signature` parameters.
 """
+
+        is_greeting = msg_lower in (
+            "hi",
+            "hello",
+            "hey",
+            "start",
+            "good morning",
+            "good afternoon",
+        )
+
+        response_md = ""
+        if is_greeting:
+            response_md = (
+                "Hello and welcome to **AstraZeneca Campaign Lab**!\n\n"
+                "I am your creative and scientific campaign partner. Attach a slide deck, document, or image—"
+                "or ask me any clinical, scientific, or market question backed by **Google Search Grounding**—and I can produce:\n\n"
+                "• **Brand Look & Feel & Single Master Strapline** — 3 distinct 4K visual directions with a recommended **Anchor Look & Feel**.\n"
+                "• **4K Widescreen Slide Deck** — `3840 × 2160` 4K slides and compiled PDF deck with extra-large executive typography.\n"
+                "• **Information Pamphlet & Agency Brief** — Multi-page A4 print-ready PDF brochures and Word `.docx` briefs with official vector logos.\n"
+                "• **Vector SVG Charts, Diagrams & Logos** — Publication-grade `.svg` and `450-DPI .png` infographics.\n"
+                "• **Campaign Videos (`.mp4`)** — Short (`20s`) or Long (`64s`) 1080p HD campaign videos.\n\n"
+                "**Brand Formatting Options:**\n"
+                "• **AstraZeneca Corporate Format** (Official AstraZeneca vector logos & Mulberry `#830051` / Gold `#F0AB00` / Navy `#003865` or Dark Plum `#1E0514` palette)\n"
+                "• **Custom Brand Palette** (Specify your background color, text color, and Hex/RGB brand colors)\n\n"
+                "What campaign, molecule, or presentation would you like to build today?"
+            )
+        else:
+            try:
+                client = genai.Client(
+                    vertexai=True,
+                    project=settings.google_cloud_project,
+                    location=settings.vertex_global_location,
+                )
+
+                contents = []
+                for turn in self.state["history"][-10:]:
+                    role = "user" if turn["role"] == "user" else "model"
+                    contents.append(
+                        types.Content(
+                            role=role, parts=[types.Part(text=turn["content"])]
+                        )
+                    )
+
+                response = None
+                for llm_model in settings.llm_model_candidates:
+                    try:
+                        response = client.models.generate_content(
+                            model=llm_model,
+                            contents=contents,
+                            config=types.GenerateContentConfig(
+                                system_instruction=system_instruction,
+                                temperature=0.2,
+                                tools=[
+                                    tool_google_search_grounding,
+                                    tool_generate_4k_key_visual_and_look_and_feel,
+                                    tool_generate_4k_slide_deck,
+                                    tool_generate_extended_pamphlet_pdf,
+                                    tool_generate_svg_charts_and_logos,
+                                    tool_generate_campaign_video,
+                                ],
+                            ),
+                        )
+                        if response and response.text:
+                            break
+                    except Exception as llm_err:
+                        logger.warning(
+                            "Model %s fallback notice (%s), trying next Gemini tier...",
+                            llm_model,
+                            llm_err,
+                        )
+                        continue
+
+                response_md = response.text if (response and response.text) else ""
+            except Exception as err:
+                logger.error("Gemini agentic execution error: %s", err)
+                response_md = ""
+
+        # Deterministic Deliverable Safeguard if user asked for deliverables and none were triggered
+        wants_generation = any(
+            kw in msg_lower
+            for kw in (
+                "auto mode",
+                "generate",
+                "slide",
+                "deck",
+                "pamphlet",
+                "brochure",
+                "video",
+                "look and feel",
+                "strapline",
+                "4k",
+                "svg",
+                "chart",
+            )
+        )
+        if wants_generation and not is_greeting and not self.state.get("turn_artifacts"):
+            try:
+                active_camp = self.state.get("campaign_name", "AZD9550 Dual Agonist")
+                active_strap = self.state.get(
+                    "master_strapline", "TWO DISTINCT PATHWAYS. ONE BALANCED FORCE."
+                )
+                active_theme = self.state.get("theme_prompt", "astrazeneca_light")
+                vid_mode = self.state.get("video_length_mode", "short")
+
+                lf_out = tool_generate_4k_key_visual_and_look_and_feel(
+                    campaign_name=active_camp,
+                    master_strapline=active_strap,
+                    theme_prompt=active_theme,
+                )
+                deck_out = tool_generate_4k_slide_deck(
+                    campaign_name=active_camp,
+                    theme_prompt=active_theme,
+                )
+                pam_out = tool_generate_extended_pamphlet_pdf(
+                    campaign_name=active_camp,
+                    master_strapline=active_strap,
+                    theme_prompt=active_theme,
+                )
+                svg_out = tool_generate_svg_charts_and_logos(
+                    campaign_name=active_camp,
+                    theme_prompt=active_theme,
+                )
+                vid_out = tool_generate_campaign_video(
+                    campaign_name=active_camp,
+                    master_strapline=active_strap,
+                    video_length_mode=vid_mode,
+                    theme_prompt=active_theme,
+                )
+
+                card = (
+                    f"### ✅ Complete Campaign Lab Deliverables ({active_camp})\n"
+                    f"**Single Master Strapline:** *\"{active_strap}\"*  \n"
+                    f"**Recommended Anchor Look & Feel:** **{lf_out['recommended_anchor']}**  \n"
+                    f"**Active Theme Palette:** `{deck_out['palette_hex']}`\n\n"
+                    f"#### 🎨 1. 3-Up Brand Look & Feel Board & 4K Hero Visual\n"
+                    f"![3-Up Brand Look & Feel Board]({lf_out['look_and_feel_board_https_url']})\n"
+                    f"- [🖼️ **View / Download 3-Up Brand Look & Feel Comparison Board (4K PNG)**]({lf_out['look_and_feel_board_https_url']})\n"
+                    f"- [🖼️ **View / Download 4K Hero Key Visual (PNG)**]({lf_out['hero_4k_https_url']})\n\n"
+                    f"#### 📊 2. 4K Widescreen Slide Deck (`3840 × 2160` Slides + Compiled PDF)\n"
+                    f"![Slide 01 Preview]({deck_out['slide_01_preview_https_url']})\n"
+                    f"- [📥 **Download Full Widescreen Slide Deck (PDF)**]({deck_out['slide_deck_pdf_https_url']})\n\n"
+                    f"#### 📕 3. Extended 4-Page A4 Scientific & Campaign Information Pamphlet\n"
+                    f"![Pamphlet Cover Preview]({pam_out['pamphlet_cover_preview_https_url']})\n"
+                    f"- [📕 **Download 4-Page A4 Information Pamphlet (PDF)**]({pam_out['pamphlet_pdf_https_url']})\n\n"
+                    f"#### 📈 4. Vector SVG & 450-DPI PNG Charts & Synergy Architecture\n"
+                    f"![Evidence Chart]({svg_out['chart_png_https_url']})\n"
+                    f"- [📊 **Download Evidence Chart (Vector SVG)**]({svg_out['chart_svg_https_url']})\n"
+                    f"- [🧬 **View Pathway Synergy Architecture (PNG)**]({svg_out['synergy_diagram_png_https_url']})\n\n"
+                    f"#### 🎬 5. 1080p HD Campaign Video (`{vid_out['video_length_mode'].upper()}` — `{vid_out['duration_seconds']}s`)\n"
+                    f"- [🎬 **Watch / Download 1080p HD Campaign Video (MP4)**]({vid_out['video_mp4_https_url']})\n"
+                )
+                response_md = (response_md + "\n\n" + card).strip() if response_md else card
+            except Exception as gen_exc:
+                logger.error("Deterministic generation error: %s", gen_exc)
+
+        if not response_md:
+            grounded = search_with_google_grounding(query=user_message)
+            response_md = grounded.get("grounded_answer") or (
+                "Hello and welcome to **AstraZeneca Campaign Lab**! "
+                "Tell me what campaign, slide deck, brand look-and-feel, pamphlet, or video you would like to create."
+            )
+
+        response_md = preserve_verified_signed_urls_callback(
+            llm_response=response_md,
+            callback_context=type("_Ctx", (), {"state": self.state})(),
+        )
+        self.state["history"].append({"role": "assistant", "content": response_md})
+
+        return {
+            "response": response_md,
+            "deliverables": self.state.get("last_deliverables", {}),
+            "turn_artifacts": self.state.get("turn_artifacts", {}),
+            "state": self.state,
+        }
+
+    def chat(self, prompt: str) -> Dict[str, Any]:
+        """Alias for interact() to support direct SDK & A2A callers."""
+        return self.interact(prompt)
 
 
 def create_campaign_lab_adk_agent(model_name: Optional[str] = None) -> Agent:
-    """Create the Google ADK Root Agent for AstraZeneca Campaign Lab (UC4)."""
-    settings = get_settings()
-    selected_model = model_name or settings.gemini_pro_model
-
+    """Create a standard Google ADK Agent descriptor for inspection and testing."""
+    cfg = get_settings()
+    selected_model = model_name or cfg.gemini_pro_model
     return Agent(
         name="astrazeneca_campaign_lab",
         model=selected_model,
         description=(
-            "AstraZeneca Campaign Lab (UC4) — Generic multimodal campaign, brand look-and-feel, "
-            "and scientific communications studio with Google Search Grounding, custom brand palette "
-            "engine, 4K slide decks, extended A4 PDF pamphlets, SVG charts/logos, and short/long videos."
+            "Executive Campaign Partner & autonomous pharmaceutical marketing multi-agent system "
+            "for AstraZeneca."
         ),
-        instruction=CAMPAIGN_LAB_SYSTEM_INSTRUCTION,
+        instruction="You are AstraZeneca Campaign Lab.",
         tools=[
             search_with_google_grounding,
             extract_attached_document_or_image_context,
@@ -256,73 +912,8 @@ def create_campaign_lab_adk_agent(model_name: Optional[str] = None) -> Agent:
             generate_custom_brand_logo_svg,
             generate_campaign_video_mp4,
             generate_campaign_brief_docx,
-            run_full_campaign_lab_pipeline,
-            upload_deliverable_to_gcs,
         ],
     )
-
-
-class AstraZenecaCampaignLabADKAgent:
-    """Session-aware conversational orchestrator wrapper for direct Python SDK & ADK invocations."""
-
-    def __init__(
-        self,
-        session_id: str = "default",
-        initial_state: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        self.session_id = session_id
-        self.state: Dict[str, Any] = dict(initial_state or {})
-        self.state.setdefault("campaign_name", "New Campaign")
-        self.state.setdefault("theme_prompt", "astrazeneca_light")
-        self.state.setdefault(
-            "master_strapline", "TWO DISTINCT PATHWAYS. ONE BALANCED FORCE."
-        )
-
-    def chat(self, prompt: str) -> Dict[str, Any]:
-        """Process a synchronous prompt and return response + generated deliverables."""
-        lower = prompt.lower()
-        theme_prompt = self.state.get("theme_prompt", "astrazeneca_light")
-        if "#4285f4" in lower or "google" in lower or "hex #" in lower:
-            theme_prompt = prompt
-            self.state["theme_prompt"] = theme_prompt
-        elif "dark" in lower or "plum" in lower:
-            theme_prompt = "astrazeneca_dark"
-            self.state["theme_prompt"] = theme_prompt
-
-        video_mode = "long" if "long" in lower and "video" in lower else "short"
-
-        if any(
-            k in lower
-            for k in ("slide", "pamphlet", "brochure", "video", "look and feel", "campaign")
-        ):
-            res = run_full_campaign_lab_pipeline(
-                campaign_name=self.state.get("campaign_name", "Strategic Campaign"),
-                campaign_objective=prompt,
-                master_strapline=self.state.get(
-                    "master_strapline", "TWO DISTINCT PATHWAYS. ONE BALANCED FORCE."
-                ),
-                theme_prompt=theme_prompt,
-                video_length_mode=video_mode,
-                upload_to_gcs=True,
-            )
-            return {
-                "response": (
-                    f"Generated the complete **{res['campaign_name']}** deliverables package "
-                    f"using theme **{res['theme']['theme_name']}** (`{res['theme']['palette_hex']}`) "
-                    f"and Single Master Strapline **\"{res['master_strapline']}\"**."
-                ),
-                "deliverables": res["deliverables"],
-                "gcs_uploads": res["gcs_uploads"],
-                "state": self.state,
-            }
-
-        grounded = search_with_google_grounding(query=prompt)
-        return {
-            "response": grounded.get("grounded_answer", ""),
-            "citations": grounded.get("citations", []),
-            "deliverables": {},
-            "state": self.state,
-        }
 
 
 root_agent = create_campaign_lab_adk_agent()

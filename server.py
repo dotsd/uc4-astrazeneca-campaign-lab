@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""FastAPI HTTP Service for AstraZeneca Campaign Lab (UC4)."""
+"""FastAPI HTTP Service for AstraZeneca Campaign Lab."""
 from __future__ import annotations
 
 from typing import Optional
@@ -27,7 +27,7 @@ settings = get_settings()
 app = FastAPI(
     title=settings.service_name,
     version="1.0.0",
-    description="Generic Multimodal Campaign & Brand Studio with Google Search Grounding (UC4)",
+    description="Executive Campaign Partner & autonomous pharmaceutical marketing multi-agent system for AstraZeneca.",
 )
 
 

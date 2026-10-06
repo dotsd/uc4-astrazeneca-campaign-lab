@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "uc4-astrazeneca-campaign-lab"
 version = "1.0.0"
-description = "AstraZeneca Campaign Lab (UC4) — Generic Multimodal Campaign & Brand Studio with Google Search Grounding, Dynamic Theme Engine, 4K Slide Decks, Extended PDFs, SVG Charts/Logos, and Short/Long Videos"
+description = "AstraZeneca Campaign Lab — Executive Campaign Partner & autonomous pharmaceutical marketing multi-agent system for AstraZeneca."
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
