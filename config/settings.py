@@ -16,12 +16,13 @@
 
 Defines Google Cloud project configuration, dedicated `UC4` Cloud Storage paths,
 V4 Signed URL service account settings, Gemini Enterprise registration targets,
-and model identifiers. Contains zero product-specific or Calquence hardcoding.
+and Gemini 3.1 / 3.x model identifiers. Contains zero product-specific or Calquence hardcoding.
 """
 from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import List, Set
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -66,10 +67,11 @@ class Settings(BaseSettings):
     # Google Search Grounding (Enabled by default for UC4)
     enable_google_grounding: bool = True
 
-    # Models
-    gemini_pro_model: str = "gemini-2.5-pro"
-    gemini_flash_model: str = "gemini-2.5-flash"
+    # Gemini 3.1 Pro / 3 Flash / Nano Banana Pro 4K Models
+    gemini_pro_model: str = "gemini-3.1-pro-preview"
+    gemini_flash_model: str = "gemini-3-flash-preview"
     gemini_image_model: str = "gemini-3-pro-image"
+    fallback_image_model: str = "gemini-3.1-flash-image"
     veo_video_model: str = "veo-3.0-generate-001"
     tts_voice_name: str = "en-GB-Neural2-B"
 
@@ -80,6 +82,62 @@ class Settings(BaseSettings):
     agent_icon_uri: str = (
         "gs://astrazeneca-ge-pilot-usecase/UC4/logos/astrazeneca_symbol_gold.png"
     )
+
+    # Upper-case compatibility aliases matching UC1 conventions
+    @property
+    def MODEL_TIER(self) -> str:
+        return self.gemini_pro_model
+
+    @property
+    def FALLBACK_MODEL_TIER(self) -> str:
+        return self.gemini_flash_model
+
+    @property
+    def IMAGEN_MODEL(self) -> str:
+        return self.gemini_image_model
+
+    @property
+    def GCS_EXPORT_BUCKET(self) -> str:
+        return self.gcs_assets_bucket
+
+    @property
+    def STAGING_BUCKET(self) -> str:
+        return self.gcs_staging_bucket
+
+    @property
+    def GCS_FOLDER_PREFIX(self) -> str:
+        return self.gcs_folder_prefix
+
+    @property
+    def SIGNING_SERVICE_ACCOUNT(self) -> str:
+        return self.signing_service_account
+
+    @property
+    def llm_model_candidates(self) -> List[str]:
+        """Ordered list of Gemini 3.x reasoning models."""
+        candidates = [
+            "gemini-3.1-pro-preview",
+            "gemini-3-flash-preview",
+            self.gemini_pro_model,
+            "gemini-3.2-pro",
+            self.gemini_flash_model,
+            "gemini-3.6-flash",
+        ]
+        seen: Set[str] = set()
+        ordered: List[str] = []
+        for m in candidates:
+            if m and m not in seen:
+                seen.add(m)
+                ordered.append(m)
+        return ordered
+
+    @property
+    def image_model_candidates(self) -> List[str]:
+        """Ordered list of Gemini 3.x 4K image generation models."""
+        return [
+            self.gemini_image_model,
+            self.fallback_image_model,
+        ]
 
     @property
     def output_dir(self) -> Path:
@@ -110,3 +168,6 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Return cached Settings instance."""
     return Settings()
+
+
+settings = get_settings()

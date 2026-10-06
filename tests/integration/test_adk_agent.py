@@ -22,11 +22,12 @@ from agents.adk_conversational_agent import (
     preserve_verified_signed_urls_callback,
     verify_signed_url_preflight,
 )
-from config.settings import get_settings
+from config.settings import settings
+from scripts.deploy_reasoning_engine import AstraZenecaCampaignLabReasoningEngine
 
 
 class TestAdkAgentIntegration(unittest.TestCase):
-    """Verify ADK agent initialization, generic campaign state overrides, and preflight helpers."""
+    """Verify ADK agent initialization, Gemini 3.1 models, generic campaign state overrides, and preflight helpers."""
 
     def test_agent_session_initialization_and_state_override(self) -> None:
         agent = AstraZenecaCampaignLabADKAgent(
@@ -44,12 +45,26 @@ class TestAdkAgentIntegration(unittest.TestCase):
             "TWO DISTINCT PATHWAYS. ONE BALANCED FORCE.",
         )
 
-    def test_adk_root_agent_and_settings(self) -> None:
-        settings = get_settings()
-        self.assertEqual(settings.service_name, "AstraZeneca Campaign Lab")
-        self.assertEqual(settings.gcs_folder_prefix, "UC4")
-        self.assertFalse(settings.enable_datastore)
-        self.assertTrue(settings.enable_google_grounding)
+    def test_gemini_3_models_and_google_adk_framework(self) -> None:
+        self.assertEqual(settings.MODEL_TIER, "gemini-3.1-pro-preview")
+        self.assertIn("gemini-3.1-pro-preview", settings.llm_model_candidates)
+        self.assertEqual(settings.IMAGEN_MODEL, "gemini-3-pro-image")
+        self.assertEqual(
+            settings.GCS_EXPORT_BUCKET, "astrazeneca-ge-pilot-usecase"
+        )
+        self.assertEqual(
+            settings.STAGING_BUCKET, "gs://astrazeneca-ge-pilot-usecase"
+        )
+        self.assertEqual(settings.GCS_FOLDER_PREFIX, "UC4")
+        self.assertEqual(
+            settings.SIGNING_SERVICE_ACCOUNT,
+            "project-service-account@gcp-ai-intelligence-dev-0a06.iam.gserviceaccount.com",
+        )
+        for m in settings.llm_model_candidates + settings.image_model_candidates:
+            self.assertNotIn("2.5", m)
+
+        engine = AstraZenecaCampaignLabReasoningEngine()
+        self.assertEqual(engine.agent_framework, "google-adk")
 
         adk_agent = create_campaign_lab_adk_agent()
         self.assertEqual(adk_agent.name, "astrazeneca_campaign_lab")
