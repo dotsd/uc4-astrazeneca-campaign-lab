@@ -22,7 +22,6 @@ Provides:
    user-attached PDFs, Word (.docx) files, text/markdown documents, and images (PNG/JPG/WEBP),
    extracting structured slides, claims, tables, and visual themes for campaign generation.
 """
-from __future__ import annotations
 
 import logging
 from pathlib import Path

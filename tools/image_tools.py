@@ -23,7 +23,6 @@ Generates:
 3. 4-Up Single-Page Look & Feel Variations Board (`3840 × 2160` 4K) demonstrating how a single page
    layout swaps metaphors (Rowing Anchor, Badminton Tandem, Sumo Equilibrium, Vitality Horizon).
 """
-from __future__ import annotations
 
 import io
 import logging

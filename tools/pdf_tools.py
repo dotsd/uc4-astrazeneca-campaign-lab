@@ -20,7 +20,6 @@ Generates:
    synergy architecture diagrams, and vector SVG AstraZeneca or custom brand logos.
 2. Individual high-res PNG previews of every pamphlet page for instant chat inspection.
 """
-from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, List, Optional

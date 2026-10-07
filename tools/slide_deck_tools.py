@@ -22,7 +22,6 @@ Supports:
 - Extra-large executive typography (88px slide titles, 62px card headers, 54px body copy)
 - Embedded 4K photographic gallery visuals and high-resolution charts on every slide
 """
-from __future__ import annotations
 
 import json
 from pathlib import Path

@@ -13,7 +13,6 @@
 # limitations under the License.
 
 """Vector SVG Parser, Official AstraZeneca Logo Renderer & Custom SVG Badge Generator (UC4)."""
-from __future__ import annotations
 
 import math
 import re

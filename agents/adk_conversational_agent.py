@@ -20,7 +20,6 @@ so it runs reliably inside the `europe-west1` Vertex AI Agent Engine runtime whi
 accessing global Gemini 3.1 Pro models, multimodal PDF/image reading, Google Search
 Grounding, native ADK in-chat artifact attachments, and verified 7-day V4 Signed URLs.
 """
-from __future__ import annotations
 
 import asyncio
 import datetime
@@ -329,12 +328,18 @@ def restore_verified_signed_urls_in_text(
     if not text:
         return text
 
-    # Remove any trailing LLM self-correction monologue if present
+    # Remove any trailing LLM self-correction monologue or maintenance disclaimers if present
     text = re.sub(
         r"\n*Wait\s*[—\-]+\s*I notice[^\n]*(?:\n.*)?$",
         "",
         text,
         flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
+    text = re.sub(
+        r"\*?\(Note:[^\n]*maintenance[^\n]*\)\*?\n*",
+        "",
+        text,
+        flags=re.IGNORECASE,
     ).strip()
 
     # Convert Markdown image syntax `![Label](https://storage...)` into clean clickable links
@@ -749,7 +754,8 @@ CRITICAL INSTRUCTIONS:
 5. **CLEAN CLICKABLE HYPERLINKS (NEVER USE `![alt](url)` IMAGE TAGS)**:
    - Format all deliverable URLs strictly as standard clickable Markdown links: `[📥 Download Deliverable Name](<https_url>)`.
    - NEVER prefix signed URLs with `!` (do NOT write `![Preview](<https_url>)`), because Gemini Enterprise renders `[Label](<https_url>)` as a clean hyperlink whereas `![Label](<https_url>)` prints raw URL text.
-   - NEVER output intermediate self-correction thoughts like "Wait — I notice...". Call all required tools first, then output one cohesive executive response.
+   - When multiple deliverables are requested, invoke all required tools in parallel in a single function-calling turn.
+   - NEVER output intermediate self-correction thoughts like "Wait — I notice..." or claim that the rendering engine is undergoing maintenance. Call all required tools first, then output one cohesive executive response.
 """
 
         is_greeting = msg_lower in (

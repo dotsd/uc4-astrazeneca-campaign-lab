@@ -23,7 +23,6 @@ Supports:
   (Google 4-color, AstraZeneca Light/Dark, or custom hex codes).
 - Self-contained Linux/macOS `ffmpeg` resolution via `shutil.which("ffmpeg")` and `imageio_ffmpeg`.
 """
-from __future__ import annotations
 
 import logging
 import math

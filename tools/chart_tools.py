@@ -18,7 +18,6 @@ Generates publication-grade vector `.svg` and high-resolution `.png` charts styl
 in any user-specified brand palette (e.g., Google #4285F4/#EA4335/#FBBC04/#34A853, AstraZeneca
 Corporate Mulberry/Gold/Navy/Teal, Dark Metabolic Plum, or custom hex codes).
 """
-from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, List, Optional
