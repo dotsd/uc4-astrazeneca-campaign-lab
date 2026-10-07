@@ -354,8 +354,40 @@ def restore_verified_signed_urls_in_text(
     if verified_urls:
         lookup.update(verified_urls)
 
+    def _resolve_best_signed_url_for_filename(fname_or_url: str) -> Optional[str]:
+        lower = fname_or_url.lower()
+        if lower.endswith(".pdf") or ".pdf" in lower:
+            if "pamphlet" in lower or "brochure" in lower:
+                return lookup.get("campaign_information_pamphlet.pdf") or lookup.get("campaign_presentation_deck_4k.pdf")
+            return lookup.get("campaign_presentation_deck_4k.pdf") or lookup.get("campaign_information_pamphlet.pdf")
+        if lower.endswith(".mp4") or ".mp4" in lower or "video" in lower:
+            return lookup.get("campaign_strategy_video.mp4")
+        if lower.endswith(".svg") or ".svg" in lower:
+            if "logo" in lower or "crest" in lower:
+                return lookup.get("campaign_brand_crest.svg") or lookup.get("campaign_evidence_chart.svg")
+            return lookup.get("campaign_evidence_chart.svg") or lookup.get("campaign_brand_crest.svg")
+        if lower.endswith(".png") or ".png" in lower or lower.endswith(".jpg") or ".jpg" in lower:
+            if "single_page" in lower or "swap" in lower or "metaphor" in lower or "variations" in lower:
+                return lookup.get("single_page_look_and_feel_variations_4k.png") or lookup.get("brand_look_and_feel_comparison_4k.png")
+            if "look" in lower or "comparison" in lower or "board" in lower:
+                return lookup.get("brand_look_and_feel_comparison_4k.png") or lookup.get("single_page_look_and_feel_variations_4k.png")
+            if "pamphlet" in lower:
+                return lookup.get("azd9550_pamphlet_page_1.png")
+            if "slide" in lower:
+                return lookup.get("azd9550_slide_01_4k.png")
+            if "synergy" in lower or "pathway" in lower:
+                return lookup.get("campaign_synergy_architecture.png")
+            if "chart" in lower or "evidence" in lower:
+                return lookup.get("campaign_evidence_chart.png")
+            return (
+                lookup.get("campaign_hero_key_visual_4k.png")
+                or lookup.get("brand_look_and_feel_comparison_4k.png")
+                or lookup.get("single_page_look_and_feel_variations_4k.png")
+            )
+        return None
+
     url_pattern = re.compile(
-        r"https://storage\.(?:googleapis|cloud\.google)\.com/[^\s\)\]\>\"']+"
+        r"https?://[^\s\)\]\>\"']+"
     )
 
     def _replace_match(match: re.Match) -> str:
@@ -369,18 +401,46 @@ def restore_verified_signed_urls_in_text(
         parsed_path = urllib.parse.unquote(base_without_query)
         filename = Path(parsed_path).name
 
-        canonical_base = base_without_query.replace(
-            "https://storage.cloud.google.com/",
-            "https://storage.googleapis.com/",
+        is_gcs = "storage.googleapis.com/" in base_without_query or "storage.cloud.google.com/" in base_without_query
+        is_fake_deliverable_host = any(
+            bad_host in base_without_query.lower()
+            for bad_host in (
+                "campaignlab.astrazeneca.com",
+                "astrazeneca.com/api/download",
+                "astrazeneca.com/downloads",
+                "example.com",
+                "your-bucket",
+                "placeholder",
+            )
         )
-        if canonical_base in lookup:
-            return lookup[canonical_base] + trailing
-        if base_without_query in lookup:
-            return lookup[base_without_query] + trailing
-        if filename in lookup:
-            return lookup[filename] + trailing
 
-        return canonical_base + trailing
+        if is_gcs:
+            canonical_base = base_without_query.replace(
+                "https://storage.cloud.google.com/",
+                "https://storage.googleapis.com/",
+            )
+            if canonical_base in lookup:
+                return lookup[canonical_base] + trailing
+            if base_without_query in lookup:
+                return lookup[base_without_query] + trailing
+            if filename in lookup:
+                return lookup[filename] + trailing
+            fallback_signed = _resolve_best_signed_url_for_filename(filename)
+            if fallback_signed:
+                return fallback_signed + trailing
+            return canonical_base + trailing
+
+        if is_fake_deliverable_host or any(
+            base_without_query.lower().endswith(ext)
+            for ext in (".pdf", ".mp4", ".png", ".svg", ".docx")
+        ):
+            if filename in lookup:
+                return lookup[filename] + trailing
+            fallback_signed = _resolve_best_signed_url_for_filename(base_without_query)
+            if fallback_signed:
+                return fallback_signed + trailing
+
+        return raw_url + trailing
 
     return url_pattern.sub(_replace_match, text)
 
@@ -848,21 +908,22 @@ CRITICAL INSTRUCTIONS:
 
         # Deterministic Deliverable Completeness Safeguard:
         # Ensure every deliverable requested by the user was generated and has clean clickable download links.
-        wants_look_and_feel = any(
+        has_attached_doc = bool(multimodal_parts) or "[attached document" in msg_lower
+        wants_look_and_feel = has_attached_doc or any(
             kw in msg_lower
-            for kw in ("look and feel", "brand", "strapline", "swimmer", "variation", "4k", "image", "picture", "campaign", "auto mode")
+            for kw in ("look and feel", "brand", "strapline", "swimmer", "variation", "4k", "image", "picture", "campaign", "auto mode", "azd9550")
         )
-        wants_slides = any(
+        wants_slides = has_attached_doc or any(
             kw in msg_lower
-            for kw in ("slide", "deck", "presentation", "4k", "campaign", "auto mode")
+            for kw in ("slide", "deck", "presentation", "4k", "campaign", "auto mode", "azd9550")
         )
-        wants_pamphlet = any(
+        wants_pamphlet = has_attached_doc or any(
             kw in msg_lower
-            for kw in ("pamphlet", "brochure", "summary of the slides", "information", "campaign", "auto mode")
+            for kw in ("pamphlet", "brochure", "summary of the slides", "information", "campaign", "auto mode", "azd9550")
         )
-        wants_video = any(
+        wants_video = has_attached_doc or any(
             kw in msg_lower
-            for kw in ("video", "mp4", "complimentary", "complementary", "campaign", "auto mode")
+            for kw in ("video", "mp4", "complimentary", "complementary", "campaign", "auto mode", "azd9550")
         )
         wants_svg = any(
             kw in msg_lower
@@ -956,10 +1017,8 @@ CRITICAL INSTRUCTIONS:
                         f"**Recommended Anchor Look & Feel:** **Concept 1 — Synchronized Rowing Pair** *(with 4-Up Single-Page Metaphor Swap Board showing Rowing, Badminton, Sumo & Vitality)*\n\n"
                         + "\n".join(links_lines)
                     )
-                    if deliv.get("video_mp4_url") and deliv["video_mp4_url"] not in response_md:
+                    if "Complete Campaign Deliverables Suite" not in response_md:
                         response_md = (response_md + "\n\n" + summary_block).strip() if response_md else summary_block
-                    elif not response_md:
-                        response_md = summary_block
             except Exception as gen_exc:
                 logger.error("Deterministic generation error: %s", gen_exc)
 
