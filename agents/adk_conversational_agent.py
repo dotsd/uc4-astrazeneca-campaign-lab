@@ -15,7 +15,7 @@
 """True Google ADK Agentic Conversational Orchestrator for AstraZeneca Campaign Lab.
 
 Uses `genai.Client(vertexai=True, location="global")` with Gemini 3.1 Pro Preview
-(`gemini-3.1-pro-preview`) and `gemini-2.5-flash-image` / Nano Banana Pro 4K gallery
+(`gemini-3.1-pro-preview`) and `gemini-3-pro-image` (Nano Banana Pro 4K)
 so it runs reliably inside the `europe-west1` Vertex AI Agent Engine runtime while
 accessing global Gemini 3.1 Pro models, multimodal PDF/image reading, Google Search
 Grounding, native ADK in-chat artifact attachments, and verified 7-day V4 Signed URLs.

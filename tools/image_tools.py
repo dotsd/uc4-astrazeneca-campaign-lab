@@ -93,7 +93,7 @@ def _generate_artistic_4k_canvas(
             project=settings.google_cloud_project,
             location=settings.vertex_global_location,
         )
-        for img_model_name in list(settings.image_model_candidates) + ["gemini-2.5-flash-image"]:
+        for img_model_name in settings.image_model_candidates:
             try:
                 result = client.models.generate_content(
                     model=img_model_name,
