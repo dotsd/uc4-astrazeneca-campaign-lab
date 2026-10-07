@@ -355,9 +355,25 @@ class AstraZenecaCampaignLabReasoningEngine(AdkApp):
         }
 
 
+def _get_deploy_credentials(project_id: str):
+    """Resolve valid credentials from ADC or fallback to `gcloud auth print-access-token`."""
+    import google.auth
+    from google.auth.transport.requests import Request
+    from google.oauth2 import credentials as oauth2_credentials
+
+    try:
+        creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        creds.refresh(Request())
+        return creds
+    except Exception:
+        token = subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True, timeout=10).strip()
+        return oauth2_credentials.Credentials(token=token, quota_project_id=project_id)
+
+
 def patch_reasoning_engine_framework_and_telemetry(
     resource_name: str,
     env_vars: Dict[str, str],
+    credentials: Optional[Any] = None,
 ) -> None:
     """Explicitly patch `spec.agent_framework = 'google-adk'` and telemetry env vars."""
     from config.settings import get_settings
@@ -372,7 +388,8 @@ def patch_reasoning_engine_framework_and_telemetry(
     settings = get_settings()
     location = settings.google_cloud_location
     client = ReasoningEngineServiceClient(
-        client_options={"api_endpoint": f"{location}-aiplatform.googleapis.com"}
+        credentials=credentials,
+        client_options={"api_endpoint": f"{location}-aiplatform.googleapis.com"},
     )
     env_entries = [{"name": k, "value": str(v)} for k, v in env_vars.items()]
     re_proto = GapicReasoningEngine(
@@ -719,10 +736,15 @@ def deploy(
         staging_bucket,
         artifact_uri,
     )
+    os.chdir(str(PROJECT_ROOT))
+    deploy_creds = _get_deploy_credentials(project_id)
+    import google.auth
+    google.auth.default = lambda *a, **kw: (deploy_creds, project_id)
     vertexai.init(
         project=project_id,
         location=location,
         staging_bucket=staging_bucket,
+        credentials=deploy_creds,
     )
 
     register_agent_in_gemini_enterprise(existing_re, display_name, description)
@@ -798,7 +820,7 @@ def deploy(
         env_vars=env_vars,
     )
     patch_reasoning_engine_framework_and_telemetry(
-        remote_engine.resource_name, env_vars
+        remote_engine.resource_name, env_vars, credentials=deploy_creds
     )
     logger.info(
         "Successfully UPDATED Agent Engine in-place with Framework='google-adk' & Telemetry=Enabled: %s",
