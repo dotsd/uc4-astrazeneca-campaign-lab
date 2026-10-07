@@ -12,15 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""4K Key Visuals, Single-Page Brand Look & Feel Variations, and Master Strapline Engine (UC4).
+"""4K Key Visuals, Single-Page Brand Look & Feel Variations, and Master Strapline Engine.
 
 Generates:
-1. 4K Ultra-HD Hero Key Visuals (`3840 × 2160` 16:9 widescreen or `2480 × 3508` A4 poster)
-   using `gemini-3-pro-image` (with deterministic high-res artistic fallback if offline).
-2. Single-Page Brand Look & Feel Variations (e.g., 3 distinct metaphors such as Synchronized Rowers,
-   Crystalline Molecule, Couple Walking / Vitality Horizon, or custom metaphors) with a Single Master
-   Strapline and Anchor Look & Feel Recommendation.
-3. 3-Up Brand Look & Feel Comparison Board (`3840 × 2160` 4K).
+1. 4K Ultra-HD Hero Key Visuals (`3840 × 2160` 16:9 widescreen) using curated 4K Nano Banana Pro
+   photographic assets and live Vertex AI image generation.
+2. 3-Up Brand Look & Feel Comparison Board (`3840 × 2160` 4K) comparing 3 distinct creative directions
+   (Synchronized Rowing Pair, Crystalline Dual Agonist Molecule, Vitality Couple Walking) under a
+   Single Master Strapline with an Anchor Look & Feel Recommendation.
+3. 4-Up Single-Page Look & Feel Variations Board (`3840 × 2160` 4K) demonstrating how a single page
+   layout swaps metaphors (Rowing Anchor, Badminton Tandem, Sumo Equilibrium, Vitality Horizon).
 """
 from __future__ import annotations
 
@@ -31,43 +32,28 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from google import genai
 from google.genai import types
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageOps
 
-from config.brand_guidelines import BrandTheme, parse_brand_theme
+from config.brand_guidelines import (
+    BrandTheme,
+    hex_to_rgb,
+    load_scalable_font,
+    parse_brand_theme,
+    resolve_gallery_image,
+)
 from config.settings import get_settings
 from tools.logo_tools import get_pil_logo_for_theme
 
 logger = logging.getLogger(__name__)
 
 
-def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    """Load clean system sans-serif font at the requested pixel size."""
-    candidates = (
-        [
-            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-            "/System/Library/Fonts/Helvetica.ttc",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        ]
-        if bold
-        else [
-            "/System/Library/Fonts/Supplemental/Arial.ttf",
-            "/System/Library/Fonts/Helvetica.ttc",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        ]
-    )
-    for c in candidates:
-        if Path(c).exists():
-            try:
-                return ImageFont.truetype(c, size=size)
-            except Exception:
-                continue
-    return ImageFont.load_default()
+def _load_font(size: int, bold: bool = False):
+    """Load a guaranteed scalable TrueType font at `size` pixels on both Linux and macOS."""
+    return load_scalable_font(size=size, bold=bold)
 
 
 def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: Any, max_width: int) -> List[str]:
-    """Wrap text to fit within max_width pixels."""
+    """Wrap text to fit within `max_width` pixels."""
     words = text.split()
     lines: List[str] = []
     cur = ""
@@ -88,8 +74,18 @@ def _generate_artistic_4k_canvas(
     prompt: str,
     theme: BrandTheme,
     size: Tuple[int, int] = (3840, 2160),
+    prefer_gallery: bool = True,
 ) -> Image.Image:
-    """Generate a 4K artistic base image via Gemini Image model or high-craft gradient/geometric studio."""
+    """Resolve a 4K photographic visual from the curated Nano Banana Pro gallery or live Vertex AI."""
+    if prefer_gallery:
+        gallery_path = resolve_gallery_image(prompt)
+        if gallery_path and gallery_path.exists():
+            try:
+                img = Image.open(gallery_path).convert("RGB")
+                return ImageOps.fit(img, size, method=Image.Resampling.LANCZOS)
+            except Exception as exc:
+                logger.debug("Gallery load note for %s: %s", gallery_path, exc)
+
     settings = get_settings()
     try:
         client = genai.Client(
@@ -97,7 +93,7 @@ def _generate_artistic_4k_canvas(
             project=settings.google_cloud_project,
             location=settings.vertex_global_location,
         )
-        for img_model_name in settings.image_model_candidates:
+        for img_model_name in list(settings.image_model_candidates) + ["gemini-2.5-flash-image"]:
             try:
                 result = client.models.generate_content(
                     model=img_model_name,
@@ -114,63 +110,43 @@ def _generate_artistic_4k_canvas(
                     for part in result.candidates[0].content.parts:
                         if getattr(part, "inline_data", None) and part.inline_data.data:
                             img = Image.open(io.BytesIO(part.inline_data.data)).convert("RGB")
-                            return img.resize(size, Image.Resampling.LANCZOS)
+                            return ImageOps.fit(img, size, method=Image.Resampling.LANCZOS)
             except Exception as model_exc:
                 logger.debug("Image model %s fallback (%s)", img_model_name, model_exc)
                 continue
     except Exception as exc:
-        logger.info("Using deterministic 4K studio canvas for prompt (%s)", exc)
+        logger.debug("Live image model fallback to gallery (%s)", exc)
 
-    # High-craft deterministic 4K studio background
-    w, h = size
-    base = Image.new("RGB", (w, h), theme.background_rgb)
-    draw = ImageDraw.Draw(base, "RGBA")
+    gallery_path = resolve_gallery_image(prompt)
+    if gallery_path and gallery_path.exists():
+        img = Image.open(gallery_path).convert("RGB")
+        return ImageOps.fit(img, size, method=Image.Resampling.LANCZOS)
 
-    p_r, p_g, p_b = theme.primary_rgb
-    s_r, s_g, s_b = theme.secondary_rgb
-    a_r, a_g, a_b = theme.accent_rgb
-
-    # Smooth diagonal luminous ribbons
-    for i in range(18):
-        alpha = int(28 + (i % 5) * 8)
-        offset = i * (w // 16)
-        draw.polygon(
-            [
-                (offset - 400, 0),
-                (offset + 260, 0),
-                (offset - 200, h),
-                (offset - 860, h),
-            ],
-            fill=(p_r, p_g, p_b, alpha if i % 2 == 0 else alpha // 2),
-        )
-    # Glowing orbs
-    overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    odraw = ImageDraw.Draw(overlay, "RGBA")
-    odraw.ellipse((int(w * 0.52), int(h * 0.12), int(w * 0.94), int(h * 0.88)), fill=(s_r, s_g, s_b, 85))
-    odraw.ellipse((int(w * 0.60), int(h * 0.22), int(w * 0.88), int(h * 0.78)), fill=(a_r, a_g, a_b, 95))
-    overlay = overlay.filter(ImageFilter.GaussianBlur(radius=65))
-    base = Image.alpha_composite(base.convert("RGBA"), overlay).convert("RGB")
-    return base
+    return Image.new("RGB", size, theme.background_rgb)
 
 
 def generate_4k_campaign_key_visual(
-    campaign_name: str,
-    headline: str,
+    campaign_name: str = "Complementary Dual-Pathway Campaign",
+    headline: str = "Complementary Strategies for the Next Era of Weight Management",
     strapline: str = "TWO DISTINCT PATHWAYS. ONE BALANCED FORCE.",
-    visual_metaphor_prompt: str = "Synchronized coastal rowing pair at golden sunrise over glass-calm teal water, ultra-detailed 4K commercial photography",
+    visual_metaphor_prompt: str = "rowing pair synchronized sunrise water",
     key_callouts: Optional[List[str]] = None,
     theme_prompt: str = "astrazeneca_dark",
     include_az_logo: Optional[bool] = None,
     reference_image_path: Optional[str] = None,
     output_filename: str = "campaign_hero_key_visual_4k.png",
 ) -> Dict[str, Any]:
-    """Generate a 4K (`3840 × 2160`) Hero Key Visual with strapline, callouts, and optional logo."""
+    """Generate a 4K (`3840 × 2160`) Hero Key Visual with extra-large executive typography and single strapline."""
     settings = get_settings()
     theme = parse_brand_theme(theme_prompt, include_az_logo=include_az_logo)
     w, h = (3840, 2160)
 
     if reference_image_path and Path(reference_image_path).exists():
-        art_img = Image.open(reference_image_path).convert("RGB").resize((w, h), Image.Resampling.LANCZOS)
+        art_img = ImageOps.fit(
+            Image.open(reference_image_path).convert("RGB"),
+            (w, h),
+            method=Image.Resampling.LANCZOS,
+        )
     else:
         art_img = _generate_artistic_4k_canvas(visual_metaphor_prompt, theme, size=(w, h))
 
@@ -178,80 +154,83 @@ def generate_4k_campaign_key_visual(
     overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay, "RGBA")
 
-    # Left editorial scrim for crisp typography
+    # Left editorial scrim for crisp, high-contrast executive typography
     bg_r, bg_g, bg_b = theme.background_rgb
-    scrim_alpha = 235 if not theme.is_dark_mode else 220
+    scrim_alpha = 238 if not theme.is_dark_mode else 224
     draw.rounded_rectangle(
-        (110, 110, 1980, h - 110),
+        (100, 100, 1980, h - 100),
         radius=44,
         fill=(bg_r, bg_g, bg_b, scrim_alpha),
         outline=(*theme.primary_rgb, 255),
-        width=6,
+        width=8,
     )
 
     # Top accent colour bar (supports 4-color Google bar or AstraZeneca bar)
-    palette = theme.palette_hex or [theme.primary_hex, theme.secondary_hex, theme.accent_hex, theme.success_hex]
-    seg_w = (1980 - 110) // len(palette)
+    palette = theme.palette_hex or [
+        theme.primary_hex,
+        theme.secondary_hex,
+        theme.accent_hex,
+        theme.success_hex,
+    ]
+    seg_w = (1980 - 100) // len(palette)
     for idx, hx in enumerate(palette):
-        x0 = 110 + idx * seg_w
+        x0 = 100 + idx * seg_w
         x1 = 1980 if idx == len(palette) - 1 else x0 + seg_w
-        from config.brand_guidelines import hex_to_rgb
-        draw.rectangle((x0, 110, x1, 134), fill=(*hex_to_rgb(hx), 255))
+        draw.rectangle((x0, 100, x1, 132), fill=(*hex_to_rgb(hx), 255))
 
-    f_kicker = _load_font(44, bold=True)
+    f_kicker = _load_font(48, bold=True)
     f_head = _load_font(86, bold=True)
     f_strap = _load_font(48, bold=True)
-    f_body = _load_font(44, bold=False)
-    f_foot = _load_font(32, bold=False)
+    f_body = _load_font(46, bold=False)
+    f_foot = _load_font(34, bold=False)
 
     # Campaign Kicker
     draw.text(
-        (190, 195),
-        campaign_name.upper()[:52],
+        (170, 185),
+        f"{campaign_name.upper()}  ·  ANCHOR KEY VISUAL"[:54],
         font=f_kicker,
         fill=(*theme.primary_rgb, 255),
     )
 
     # Headline
-    y_cur = 285
-    for line in _wrap_text(draw, headline, f_head, 1680)[:3]:
-        draw.text((190, y_cur), line, font=f_head, fill=(*theme.text_primary_rgb, 255))
+    y_cur = 275
+    for line in _wrap_text(draw, headline, f_head, 1700)[:3]:
+        draw.text((170, y_cur), line, font=f_head, fill=(*theme.text_primary_rgb, 255))
         y_cur += 104
 
     # Single Master Strapline Pill
     y_cur += 28
     draw.rounded_rectangle(
-        (190, y_cur, 1880, y_cur + 108),
-        radius=24,
+        (170, y_cur, 1900, y_cur + 114),
+        radius=26,
         fill=(*theme.primary_rgb, 255),
     )
     draw.text(
-        (235, y_cur + 26),
+        (215, y_cur + 28),
         strapline[:58],
         font=f_strap,
         fill=(255, 255, 255, 255),
     )
-    y_cur += 160
+    y_cur += 165
 
     # Key Callout Bullets
     callouts = key_callouts or [
-        "Complementary dual-pathway synergy driving durable outcomes",
-        "High-contrast executive typography & custom brand palette adherence",
-        "Grounded clinical & commercial narrative ready for omnichannel launch",
+        "GLP-1 Receptor Pathway: Central satiety, glycemic control & reduced caloric intake",
+        "Glucagon Receptor Pathway: Increased energy expenditure, lipolysis & hepatic fat clearance",
+        "Complementary Dual Agonism: Superior weight loss quality & multi-organ cardiometabolic benefit",
     ]
     for idx, item in enumerate(callouts[:4]):
         col_hex = palette[idx % len(palette)]
-        from config.brand_guidelines import hex_to_rgb
         dot_rgb = hex_to_rgb(col_hex)
-        draw.ellipse((195, y_cur + 12, 231, y_cur + 48), fill=(*dot_rgb, 255))
-        for b_line in _wrap_text(draw, item, f_body, 1580)[:2]:
-            draw.text((260, y_cur), b_line, font=f_body, fill=(*theme.text_primary_rgb, 255))
-            y_cur += 58
-        y_cur += 28
+        draw.ellipse((175, y_cur + 12, 215, y_cur + 52), fill=(*dot_rgb, 255))
+        for b_line in _wrap_text(draw, item, f_body, 1620)[:2]:
+            draw.text((245, y_cur), b_line, font=f_body, fill=(*theme.text_primary_rgb, 255))
+            y_cur += 60
+        y_cur += 32
 
     # Compliance footer
     draw.text(
-        (190, h - 185),
+        (170, h - 180),
         theme.compliance_footer,
         font=f_foot,
         fill=(*theme.text_secondary_rgb, 255),
@@ -259,10 +238,9 @@ def generate_4k_campaign_key_visual(
 
     composed = Image.alpha_composite(canvas_img, overlay)
 
-    # Paste official AstraZeneca logo if enabled in theme
     logo_img = get_pil_logo_for_theme(theme, max_height=96)
     if logo_img is not None:
-        composed.paste(logo_img, (1880 - logo_img.width, h - 225), logo_img)
+        composed.paste(logo_img, (1900 - logo_img.width, h - 225), logo_img)
 
     out_path = settings.output_dir / output_filename
     composed.convert("RGB").save(out_path, format="PNG", optimize=True)
@@ -279,24 +257,24 @@ def generate_4k_campaign_key_visual(
 
 
 def generate_brand_look_and_feel_variations_4k(
-    campaign_name: str,
+    campaign_name: str = "AZD9550 Complementary Dual Agonist",
     master_strapline: str = "TWO DISTINCT PATHWAYS. ONE BALANCED FORCE.",
-    variation_1_title: str = "Look & Feel 1 (Recommended Anchor): Synchronized Tandem",
-    variation_1_subtitle: str = "Two distinct forces moving in precision harmony toward one shared horizon",
-    variation_2_title: str = "Look & Feel 2: Crystalline Molecular Convergence",
-    variation_2_subtitle: str = "Dual-receptor structural brilliance fusing gold and teal pathways",
-    variation_3_title: str = "Look & Feel 3: Human Vitality & Shared Stride",
-    variation_3_subtitle: str = "Sustained real-world patient freedom and multi-organ systemic well-being",
+    variation_1_title: str = "Look & Feel 1 (Recommended Anchor): Synchronized Rowing Pair",
+    variation_1_subtitle: str = "Two rowers moving in precision synchrony across glass-calm water at sunrise—instantly communicating complementary dual action.",
+    variation_2_title: str = "Look & Feel 2: Crystalline Dual-Receptor Helix",
+    variation_2_subtitle: str = "Two luminous molecular ribbons (Gold GLP-1 & Teal Glucagon) converging into a single balanced therapeutic structure.",
+    variation_3_title: str = "Look & Feel 3: Vitality Couple Walking",
+    variation_3_subtitle: str = "Sustained real-world patient freedom, energy balance, and multi-organ cardiometabolic well-being.",
     anchor_recommendation_rationale: str = (
-        "Look & Feel 1 (Synchronized Tandem) is recommended as the Primary Anchor Look & Feel "
+        "Look & Feel 1 (Synchronized Rowing Pair) is recommended as the Primary Anchor Look & Feel "
         "because it immediately communicates complementary dual action in a single human glance, "
-        "while scaling effortlessly across congress booths, digital slides, and print brochures."
+        "while allowing seamless single-page metaphor swaps (Rowing, Badminton Tandem, Sumo Equilibrium, Vitality Couple)."
     ),
-    theme_prompt: str = "astrazeneca_dark",
+    theme_prompt: str = "astrazeneca_light",
     include_az_logo: Optional[bool] = None,
     output_filename: str = "brand_look_and_feel_comparison_4k.png",
 ) -> Dict[str, Any]:
-    """Generate a 4K (`3840 × 2160`) 3-Up Brand Look & Feel Comparison Board with a Single Master Strapline."""
+    """Generate both the 3-Up Brand Look & Feel Board (4K) and the 4-Up Single-Page Metaphor Variations Board (4K)."""
     settings = get_settings()
     theme = parse_brand_theme(theme_prompt, include_az_logo=include_az_logo)
     w, h = (3840, 2160)
@@ -304,15 +282,15 @@ def generate_brand_look_and_feel_variations_4k(
     board = Image.new("RGBA", (w, h), (*theme.background_rgb, 255))
     draw = ImageDraw.Draw(board, "RGBA")
 
-    f_title = _load_font(76, bold=True)
+    f_title = _load_font(74, bold=True)
     f_strap = _load_font(46, bold=True)
-    f_card_h = _load_font(48, bold=True)
+    f_card_h = _load_font(46, bold=True)
     f_card_b = _load_font(38, bold=False)
     f_rec = _load_font(40, bold=True)
 
     # Header
     draw.text(
-        (140, 95),
+        (140, 85),
         f"{campaign_name.upper()} — 3 BRAND LOOK & FEEL DIRECTIONS",
         font=f_title,
         fill=(*theme.text_primary_rgb, 255),
@@ -320,32 +298,30 @@ def generate_brand_look_and_feel_variations_4k(
 
     # Single Master Strapline Banner across top
     draw.rounded_rectangle(
-        (140, 205, w - 140, 305),
+        (140, 195, w - 140, 298),
         radius=22,
         fill=(*theme.primary_rgb, 255),
     )
     draw.text(
-        (185, 228),
+        (185, 220),
         f"SINGLE MASTER STRAPLINE:  \"{master_strapline}\"",
         font=f_strap,
         fill=(255, 255, 255, 255),
     )
 
     variations = [
-        (variation_1_title, variation_1_subtitle, theme.primary_hex, True),
-        (variation_2_title, variation_2_subtitle, theme.secondary_hex, False),
-        (variation_3_title, variation_3_subtitle, theme.accent_hex, False),
+        (variation_1_title, variation_1_subtitle, "rowing pair sunrise", theme.primary_hex, True),
+        (variation_2_title, variation_2_subtitle, "dual_helix molecule crystal", theme.secondary_hex, False),
+        (variation_3_title, variation_3_subtitle, "vitality couple walking", theme.accent_hex, False),
     ]
 
     card_w = 1120
     gap = 60
     start_x = 140
-    card_top = 355
-    card_bottom = 1720
+    card_top = 340
+    card_bottom = 1725
 
-    from config.brand_guidelines import hex_to_rgb
-
-    for idx, (v_title, v_sub, accent_hx, is_anchor) in enumerate(variations):
+    for idx, (v_title, v_sub, img_key, accent_hx, is_anchor) in enumerate(variations):
         x0 = start_x + idx * (card_w + gap)
         x1 = x0 + card_w
         acc_rgb = hex_to_rgb(accent_hx)
@@ -355,46 +331,49 @@ def generate_brand_look_and_feel_variations_4k(
             radius=34,
             fill=(*theme.card_background_rgb, 255),
             outline=(*acc_rgb, 255),
-            width=8 if is_anchor else 4,
+            width=10 if is_anchor else 5,
         )
 
-        # Visual preview header inside card
-        art_preview = _generate_artistic_4k_canvas(v_title + " " + v_sub, theme, size=(card_w - 40, 560))
+        # Photographic 4K visual preview inside card
+        art_preview = _generate_artistic_4k_canvas(
+            img_key + " " + v_title,
+            theme,
+            size=(card_w - 40, 620),
+            prefer_gallery=True,
+        )
         board.paste(art_preview.convert("RGBA"), (x0 + 20, card_top + 20))
 
         if is_anchor:
             draw.rounded_rectangle(
-                (x0 + 45, card_top + 45, x0 + 620, card_top + 115),
-                radius=16,
+                (x0 + 45, card_top + 45, x0 + 660, card_top + 120),
+                radius=18,
                 fill=(*acc_rgb, 255),
             )
             draw.text(
-                (x0 + 70, card_top + 58),
+                (x0 + 70, card_top + 60),
                 "★ RECOMMENDED ANCHOR",
-                font=_load_font(34, bold=True),
+                font=_load_font(36, bold=True),
                 fill=(255, 255, 255, 255),
             )
 
         # Card Title
-        ty = card_top + 620
+        ty = card_top + 665
         for line in _wrap_text(draw, v_title, f_card_h, card_w - 90)[:2]:
             draw.text((x0 + 45, ty), line, font=f_card_h, fill=(*theme.text_primary_rgb, 255))
             ty += 58
 
-        # Strapline lockup on each card
-        ty += 20
+        # Single Master Strapline badge on each card
+        ty += 18
         draw.rounded_rectangle(
-            (x0 + 45, ty, x1 - 45, ty + 82),
+            (x0 + 45, ty, x1 - 45, ty + 86),
             radius=16,
-            fill=(*acc_rgb, 45),
-            outline=(*acc_rgb, 255),
-            width=3,
+            fill=(*acc_rgb, 255),
         )
         draw.text(
-            (x0 + 70, ty + 20),
-            master_strapline[:42],
+            (x0 + 70, ty + 22),
+            master_strapline[:44],
             font=_load_font(34, bold=True),
-            fill=(*theme.text_primary_rgb, 255),
+            fill=(255, 255, 255, 255),
         )
         ty += 115
 
@@ -405,29 +384,203 @@ def generate_brand_look_and_feel_variations_4k(
 
     # Bottom Anchor Recommendation Box
     draw.rounded_rectangle(
-        (140, 1765, w - 140, 2040),
+        (140, 1765, w - 140, 2050),
         radius=28,
         fill=(*theme.card_background_rgb, 255),
         outline=(*theme.primary_rgb, 255),
-        width=5,
+        width=6,
     )
     ry = 1800
-    for line in _wrap_text(draw, f"AGENCY RECOMMENDATION: {anchor_recommendation_rationale}", f_rec, w - 380)[:3]:
+    for line in _wrap_text(
+        draw,
+        f"RECOMMENDED ANCHOR LOOK & FEEL: {anchor_recommendation_rationale}",
+        f_rec,
+        w - 380,
+    )[:3]:
         draw.text((185, ry), line, font=f_rec, fill=(*theme.text_primary_rgb, 255))
-        ry += 54
+        ry += 56
 
-    logo_img = get_pil_logo_for_theme(theme, max_height=82)
+    logo_img = get_pil_logo_for_theme(theme, max_height=84)
     if logo_img is not None:
-        board.paste(logo_img, (w - 160 - logo_img.width, 95), logo_img)
+        board.paste(logo_img, (w - 160 - logo_img.width, 85), logo_img)
 
     out_path = settings.output_dir / output_filename
     board.convert("RGB").save(out_path, format="PNG", optimize=True)
 
+    # Also generate the 4-Up Single-Page Look & Feel Metaphor Swap Board (Rowing, Badminton, Sumo, Vitality)
+    sp_res = generate_single_page_metaphor_swap_board_4k(
+        campaign_name=campaign_name,
+        master_strapline=master_strapline,
+        theme=theme,
+    )
+    sp_path = sp_res["swap_board_image_path"]
+
     return {
         "status": "success",
         "board_image_path": str(out_path),
+        "single_page_variations_board_path": str(sp_path),
+        "dimensions": "3840x2160 (4K UHD)",
+        "campaign_name": campaign_name,
         "master_strapline": master_strapline,
         "recommended_anchor": variation_1_title,
         "anchor_rationale": anchor_recommendation_rationale,
+        "theme_id": theme.theme_id,
+    }
+
+
+def generate_single_page_metaphor_swap_board_4k(
+    campaign_name: str = "AZD9550",
+    master_strapline: str = "TWO DISTINCT PATHWAYS. ONE BALANCED FORCE.",
+    theme_prompt: str = "astrazeneca_light",
+    theme: Optional[BrandTheme] = None,
+    include_az_logo: Optional[bool] = None,
+    output_filename: str = "single_page_look_and_feel_variations_4k.png",
+) -> Dict[str, Any]:
+    """Generate a 4-Up Single-Page Look & Feel Variations Board showing Rowing, Badminton, Sumo, and Vitality swaps."""
+    settings = get_settings()
+    if theme is None:
+        theme = parse_brand_theme(theme_prompt, include_az_logo=include_az_logo)
+    w, h = (3840, 2160)
+    board = Image.new("RGBA", (w, h), (*theme.background_rgb, 255))
+    draw = ImageDraw.Draw(board, "RGBA")
+
+    f_title = _load_font(68, bold=True)
+    f_sub = _load_font(42, bold=True)
+    f_card_h = _load_font(42, bold=True)
+    f_card_b = _load_font(34, bold=False)
+
+    draw.text(
+        (120, 75),
+        f"{campaign_name.upper()} — SINGLE-PAGE LOOK & FEEL METAPHOR VARIATIONS",
+        font=f_title,
+        fill=(*theme.text_primary_rgb, 255),
+    )
+    draw.text(
+        (120, 165),
+        f"Unified Layout & Single Master Strapline (\"{master_strapline}\") Across Interchangeable Visual Metaphors",
+        font=f_sub,
+        fill=(*theme.primary_rgb, 255),
+    )
+
+    swaps = [
+        (
+            "Variation A (Anchor): Rowing Pair",
+            "Synchronized sculling pair—precision dual-pathway propulsion",
+            "rowing pair sunrise",
+            theme.primary_hex,
+            True,
+        ),
+        (
+            "Variation B: Badminton Tandem",
+            "Mixed-doubles court agility—complementary front & back-court coverage",
+            "badminton tandem court",
+            theme.secondary_hex,
+            False,
+        ),
+        (
+            "Variation C: Sumo Equilibrium",
+            "Balanced opposing forces—power & metabolic counter-equilibrium",
+            "sumo equilibrium balance",
+            theme.accent_hex,
+            False,
+        ),
+        (
+            "Variation D: Vitality Couple",
+            "Shared real-world patient stride—durable cardiometabolic freedom",
+            "vitality couple walking",
+            theme.success_hex,
+            False,
+        ),
+    ]
+
+    card_w = 840
+    gap = 45
+    start_x = 120
+    card_top = 260
+    card_bottom = 2020
+
+    for idx, (title, desc, img_key, hx, is_anchor) in enumerate(swaps):
+        x0 = start_x + idx * (card_w + gap)
+        x1 = x0 + card_w
+        col = hex_to_rgb(hx)
+
+        draw.rounded_rectangle(
+            (x0, card_top, x1, card_bottom),
+            radius=30,
+            fill=(*theme.card_background_rgb, 255),
+            outline=(*col, 255),
+            width=9 if is_anchor else 4,
+        )
+        # Top color bar inside each single-page mockup
+        draw.rectangle((x0 + 20, card_top + 20, x1 - 20, card_top + 46), fill=(*col, 255))
+
+        photo = _generate_artistic_4k_canvas(
+            img_key,
+            theme,
+            size=(card_w - 40, 880),
+            prefer_gallery=True,
+        )
+        board.paste(photo.convert("RGBA"), (x0 + 20, card_top + 56))
+
+        if is_anchor:
+            draw.rounded_rectangle(
+                (x0 + 40, card_top + 80, x0 + 520, card_top + 148),
+                radius=14,
+                fill=(*col, 255),
+            )
+            draw.text(
+                (x0 + 60, card_top + 92),
+                "★ ANCHOR LOOK & FEEL",
+                font=_load_font(32, bold=True),
+                fill=(255, 255, 255, 255),
+            )
+
+        ty = card_top + 965
+        for line in _wrap_text(draw, title, f_card_h, card_w - 70)[:2]:
+            draw.text((x0 + 35, ty), line, font=f_card_h, fill=(*theme.text_primary_rgb, 255))
+            ty += 52
+
+        ty += 16
+        draw.rounded_rectangle(
+            (x0 + 35, ty, x1 - 35, ty + 90),
+            radius=14,
+            fill=(*col, 255),
+        )
+        for s_line in _wrap_text(draw, master_strapline, _load_font(30, bold=True), card_w - 100)[:2]:
+            draw.text((x0 + 55, ty + 14), s_line, font=_load_font(30, bold=True), fill=(255, 255, 255, 255))
+            ty += 34
+        ty += 75
+
+        for line in _wrap_text(draw, desc, f_card_b, card_w - 70)[:4]:
+            draw.text((x0 + 35, ty), line, font=f_card_b, fill=(*theme.text_secondary_rgb, 255))
+            ty += 46
+
+        # Mini Dual-Pathway Footer Pill inside each single-page preview
+        draw.rounded_rectangle(
+            (x0 + 35, card_bottom - 140, x1 - 35, card_bottom - 45),
+            radius=14,
+            fill=(*theme.background_rgb, 255),
+            outline=(*col, 255),
+            width=3,
+        )
+        draw.text(
+            (x0 + 50, card_bottom - 110),
+            "Pillar 1 (Satiety & Glycemia) + Pillar 2 (Energy & Liver)",
+            font=_load_font(23, bold=True),
+            fill=(*theme.text_primary_rgb, 255),
+        )
+
+    logo_img = get_pil_logo_for_theme(theme, max_height=80)
+    if logo_img is not None:
+        board.paste(logo_img, (w - 140 - logo_img.width, 75), logo_img)
+
+    out_path = settings.output_dir / output_filename
+    board.convert("RGB").save(out_path, format="PNG", optimize=True)
+    return {
+        "status": "success",
+        "swap_board_image_path": str(out_path),
+        "dimensions": "3840x2160 (4K UHD)",
+        "campaign_name": campaign_name,
+        "master_strapline": master_strapline,
         "theme_id": theme.theme_id,
     }

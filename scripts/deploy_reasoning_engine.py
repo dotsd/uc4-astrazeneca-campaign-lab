@@ -139,11 +139,13 @@ class AstraZenecaCampaignLabBaseAgent(BaseAgent):
     ) -> AsyncGenerator[Event, None]:
         _ensure_sys_path()
         user_text = ""
+        multimodal_parts: List[types.Part] = []
         if ctx.user_content and ctx.user_content.parts:
             for part in ctx.user_content.parts:
                 if getattr(part, "text", None):
                     user_text += part.text + " "
                 elif getattr(part, "inline_data", None) and part.inline_data.data:
+                    multimodal_parts.append(part)
                     mime = (part.inline_data.mime_type or "").lower()
                     if "pdf" in mime:
                         try:
@@ -151,13 +153,16 @@ class AstraZenecaCampaignLabBaseAgent(BaseAgent):
 
                             reader = PdfReader(io.BytesIO(part.inline_data.data))
                             pdf_text = "\n".join(
-                                page.extract_text() or "" for page in reader.pages[:20]
+                                f"--- Slide/Page {idx + 1} ---\n" + (page.extract_text() or "")
+                                for idx, page in enumerate(reader.pages[:40])
                             )
                             user_text += (
-                                f"\n[Uploaded PDF Document Content]:\n{pdf_text[:10000]}\n"
+                                f"\n[Uploaded PDF Document Content]:\n{pdf_text[:30000]}\n"
                             )
                         except Exception as exc:
                             logger.warning("PDF inline extraction warning: %s", exc)
+                elif getattr(part, "file_data", None) and getattr(part.file_data, "file_uri", None):
+                    multimodal_parts.append(part)
         user_text = user_text.strip() or "Hello"
 
         session_id = getattr(ctx.session, "id", "default") or "default"
@@ -182,10 +187,11 @@ class AstraZenecaCampaignLabBaseAgent(BaseAgent):
         runtime_settings.uploads_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info(
-            "ADK invocation started | session_id=%s | user_id=%s | user_text_len=%d",
+            "ADK invocation started | session_id=%s | user_id=%s | user_text_len=%d | multimodal_parts=%d",
             session_id,
             user_id,
             len(user_text),
+            len(multimodal_parts),
         )
         event_actions = EventActions(state_delta={}, artifact_delta={})
         cb_ctx = CallbackContext(ctx, event_actions=event_actions)
@@ -195,7 +201,11 @@ class AstraZenecaCampaignLabBaseAgent(BaseAgent):
             initial_state=initial_state,
             tool_context=cb_ctx,
         )
-        result = agent.interact(user_text, tool_context=cb_ctx)
+        result = agent.interact(
+            user_text,
+            tool_context=cb_ctx,
+            multimodal_parts=multimodal_parts,
+        )
         response_text = result.get("response", "")
 
         updated_state = result.get("state", {})
@@ -740,6 +750,7 @@ def deploy(
         "numpy>=2.0.0",
         "pypdf>=4.0.0",
         "httpx>=0.27.0",
+        "imageio-ffmpeg>=0.6.0",
         "cloudpickle>=3.0.0",
         "opentelemetry-sdk>=1.25.0",
         "opentelemetry-exporter-gcp-trace>=1.6.0",
@@ -752,6 +763,7 @@ def deploy(
         "agents",
         "config",
         "tools",
+        "scripts",
         "assets",
     ]
 

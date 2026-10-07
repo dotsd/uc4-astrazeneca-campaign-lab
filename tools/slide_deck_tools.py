@@ -20,10 +20,11 @@ Supports:
 - AstraZeneca Corporate Light Executive or AstraZeneca Dark Metabolic Plum formats
 - Official AstraZeneca vector SVG/PNG logos and icons when requested
 - Extra-large executive typography (88px slide titles, 62px card headers, 54px body copy)
-- Embedded charts, graphs, and 4K visual panels
+- Embedded 4K photographic gallery visuals and high-resolution charts on every slide
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -31,90 +32,196 @@ from PIL import Image, ImageDraw
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
-from config.brand_guidelines import BrandTheme, hex_to_rgb, parse_brand_theme
+from config.brand_guidelines import (
+    BrandTheme,
+    hex_to_rgb,
+    parse_brand_theme,
+    resolve_gallery_image,
+)
 from config.settings import get_settings
-from tools.chart_tools import generate_campaign_chart_svg_and_png
+from tools.chart_tools import (
+    generate_campaign_chart_svg_and_png,
+    generate_pathway_synergy_svg_and_png,
+)
 from tools.image_tools import _load_font, _wrap_text
 from tools.logo_tools import get_pil_logo_for_theme
 
 
 DEFAULT_GENERIC_SLIDES: List[Dict[str, Any]] = [
     {
-        "kicker": "SLIDE 01  ·  EXECUTIVE OVERVIEW",
-        "title": "Strategic Campaign Vision & Core Proposition",
+        "kicker": "SLIDE 01  ·  EXECUTIVE CAMPAIGN OVERVIEW",
+        "title": "Complementary Dual-Pathway Strategy & Brand Vision",
         "subtitle": "TWO DISTINCT PATHWAYS. ONE BALANCED FORCE.",
+        "image_key": "rowing_pair_4k",
+        "visual_caption": "ANCHOR METAPHOR  ·  SYNCHRONIZED ROWING PAIR",
         "cards": [
             {
-                "header": "Unmet Clinical & Market Need",
+                "header": "Unmet Multi-System Clinical Need",
                 "bullets": [
-                    "Addressing multi-system complexity beyond single-target monotherapy limitations.",
-                    "Delivering clear, high-impact scientific differentiation for healthcare professionals.",
+                    "Moving beyond single-target monotherapy limitations in complex cardiometabolic disease.",
+                    "Addressing interconnected weight, hepatic lipid overload, and glycemic priorities simultaneously.",
                 ],
             },
             {
-                "header": "Integrated Campaign Strategy",
+                "header": "Anchor Campaign Look & Feel",
                 "bullets": [
-                    "Unified visual metaphor and single master strapline across every touchpoint.",
-                    "Grounded clinical evidence paired with executive-grade visual storytelling.",
+                    "Unified under a single master strapline: 'TWO DISTINCT PATHWAYS. ONE BALANCED FORCE.'",
+                    "Synchronized rowing pair metaphor: two independent oars driving one balanced vessel.",
                 ],
             },
         ],
     },
     {
-        "kicker": "SLIDE 02  ·  PRIMARY MECHANISM PILLAR",
-        "title": "Pillar 1: Foundational Systemic Regulation",
-        "subtitle": "Targeted central and peripheral signaling for proven baseline control",
+        "kicker": "SLIDE 02  ·  SINGLE-PAGE METAPHOR VARIATIONS",
+        "title": "Flexible Visual Metaphor System Across Markets",
+        "subtitle": "How the Rowing Anchor swaps seamlessly with Badminton, Sumo & Vitality",
+        "image_key": "badminton_tandem_4k",
+        "visual_caption": "VARIATION A  ·  MIXED DOUBLES BADMINTON TANDEM",
         "cards": [
             {
-                "header": "Core Pathway Activation",
+                "header": "Recommended Anchor: Synchronized Rowing",
                 "bullets": [
-                    "High-affinity receptor engagement driving sustained systemic control.",
-                    "Robust reductions in primary disease burden and metabolic intake.",
+                    "Captures dual mechanical propulsion and hydrodynamic stability at dawn.",
+                    "Clear non-oncology differentiation vs. single-athlete monotherapy campaigns.",
                 ],
             },
             {
-                "header": "Clinical & Patient Impact",
+                "header": "Interchangeable Single-Page Variations",
                 "bullets": [
-                    "Predictable, well-characterized foundational efficacy profile.",
-                    "Sets the stage for complementary second-pathway amplification.",
+                    "Badminton Tandem (Agility & Reflex), Sumo Equilibrium (Grounded Force), Vitality Couple (Patient Outcome).",
+                    "All variations preserve the identical layout grid, typography, and single strapline.",
                 ],
             },
         ],
     },
     {
-        "kicker": "SLIDE 03  ·  COMPLEMENTARY MECHANISM PILLAR",
-        "title": "Pillar 2: Direct Organ & Energy Mobilization",
-        "subtitle": "Unlocking direct hepatic lipid oxidation and energy expenditure",
+        "kicker": "SLIDE 03  ·  PILLAR 1 MECHANISM OF ACTION",
+        "title": "Pillar 1: Central Satiety & Systemic Glycemic Control",
+        "subtitle": "Targeted hypothalamic satiety signaling and insulinotropic baseline regulation",
+        "image_key": "glp1_pathway_4k",
+        "visual_caption": "PILLAR 1  ·  CENTRAL SATIETY & PANCREATIC SIGNALING",
         "cards": [
             {
-                "header": "Direct Organ Remodeling",
+                "header": "Central Appetite & Intake Regulation",
                 "bullets": [
-                    "Accelerates lipid clearance, β-oxidation, and metabolic rate.",
-                    "Targets visceral and ectopic organ fat depots directly.",
+                    "Engages central satiety centers to reduce caloric intake and cravings.",
+                    "Delivers predictable, well-characterized foundational weight and glycemic control.",
                 ],
             },
             {
-                "header": "Synergistic Balance",
+                "header": "Systemic Cardiometabolic Foundation",
                 "bullets": [
-                    "Complements Pillar 1 to achieve deeper, more durable outcomes.",
-                    "Designed to preserve lean tissue quality while maximizing fat loss.",
+                    "Improves glucose-dependent insulin secretion and systemic metabolic homeostasis.",
+                    "Creates the clinical foundation for complementary organ-level amplification.",
                 ],
             },
         ],
     },
     {
-        "kicker": "SLIDE 04  ·  QUANTITATIVE EVIDENCE & SYNERGY",
+        "kicker": "SLIDE 04  ·  PILLAR 2 COMPLEMENTARY MECHANISM",
+        "title": "Pillar 2: Direct Hepatic Lipid Oxidation & Energy Expenditure",
+        "subtitle": "Unlocking direct liver fat clearance, lipolysis, and thermogenic expenditure",
+        "image_key": "gcg_liver_4k",
+        "visual_caption": "PILLAR 2  ·  HEPATIC LIPID OXIDATION & EXPENDITURE",
+        "cards": [
+            {
+                "header": "Direct Hepatic & Organ Remodeling",
+                "bullets": [
+                    "Stimulates hepatic β-oxidation and rapid mobilization of ectopic liver lipids.",
+                    "Directly targets steatotic and visceral fat depots beyond caloric restriction alone.",
+                ],
+            },
+            {
+                "header": "Resting Energy Expenditure Amplification",
+                "bullets": [
+                    "Counteracts metabolic adaptation by sustaining whole-body energy expenditure.",
+                    "Works in concert with Pillar 1 to deepen total fat mass reduction.",
+                ],
+            },
+        ],
+    },
+    {
+        "kicker": "SLIDE 05  ·  COMPLEMENTARY DUAL-PATHWAY SYNERGY",
+        "title": "Why Complementary Balance Outperforms Single-Target Saturation",
+        "subtitle": "Calibrated receptor ratio engineered for efficacy and tolerability",
+        "image_key": "dual_helix_4k",
+        "visual_caption": "MOLECULAR ARCHITECTURE  ·  CALIBRATED DUAL AGONISM",
+        "cards": [
+            {
+                "header": "Avoiding Single-Pathway Dose Ceiling",
+                "bullets": [
+                    "Pushing a single receptor to maximum saturation increases GI intolerance with diminishing returns.",
+                    "Balancing two complementary pathways achieves superior efficacy at better-tolerated receptor occupancy.",
+                ],
+            },
+            {
+                "header": "Glycemic Equilibrium by Design",
+                "bullets": [
+                    "Pillar 1 insulinotropic action buffers Pillar 2 hepatic glucose output.",
+                    "Delivers deep lipid clearance while maintaining robust HbA1c improvements.",
+                ],
+            },
+        ],
+    },
+    {
+        "kicker": "SLIDE 06  ·  QUANTITATIVE MULTI-ENDPOINT EVIDENCE",
         "title": "Complementary Dual Strategy vs. Single-Pathway Baseline",
-        "subtitle": "Multi-dimensional efficacy across primary and secondary endpoints",
+        "subtitle": "Multi-dimensional efficacy across weight, hepatic lipid clearance & metabolic rate",
         "include_chart": True,
         "cards": [
             {
-                "header": "Key Quantitative Takeaways",
+                "header": "Key Quantitative Differentiators",
                 "bullets": [
-                    "Superior composite response across weight, hepatic lipid clearance, and glycemic control.",
-                    "Balanced tolerability and sustained long-term trajectory.",
+                    "Superior composite response across total weight loss, hepatic fat fraction reduction, and glycemic control.",
+                    "High-quality body composition: preserves lean muscle mass while clearing visceral and liver fat.",
                 ],
-            }
+            },
+        ],
+    },
+    {
+        "kicker": "SLIDE 07  ·  MULTI-ORGAN & SYSTEMIC PROTECTION",
+        "title": "Interconnected Cardiometabolic, Hepatic & Renal Impact",
+        "subtitle": "Treating the whole metabolic ecosystem across MASH, obesity, T2D & CV risk",
+        "image_key": "organ_synergy_4k",
+        "visual_caption": "MULTI-ORGAN ECOSYSTEM  ·  BRAIN, LIVER, HEART & KIDNEY",
+        "cards": [
+            {
+                "header": "Cross-Organ Disease Modification",
+                "bullets": [
+                    "Simultaneously addresses central appetite, hepatic steatosis (MASH), and cardiovascular risk factors.",
+                    "Reduces lipotoxicity and systemic inflammation across target organ systems.",
+                ],
+            },
+            {
+                "header": "Combination & Pipeline Readiness",
+                "bullets": [
+                    "Engineered as both a best-in-class standalone therapy and a foundational combination backbone.",
+                    "Supports tailored patient segmentation across obesity, T2D, and metabolic liver disease.",
+                ],
+            },
+        ],
+    },
+    {
+        "kicker": "SLIDE 08  ·  PATIENT OUTCOMES & OMNICHANNEL SUMMARY",
+        "title": "Restoring Whole-Body Metabolic Vitality & Balance",
+        "subtitle": "TWO DISTINCT PATHWAYS. ONE BALANCED FORCE.",
+        "image_key": "vitality_couple_4k",
+        "visual_caption": "PATIENT OUTCOME  ·  SUSTAINED METABOLIC VITALITY",
+        "cards": [
+            {
+                "header": "Patient-Centered Clinical Value",
+                "bullets": [
+                    "Translates dual molecular pharmacology into tangible daily energy, mobility, and organ resilience.",
+                    "Clear, memorable scientific narrative for endocrinologists, hepatologists, and cardiologists.",
+                ],
+            },
+            {
+                "header": "Omnichannel Campaign Deliverables Ready",
+                "bullets": [
+                    "3-Up Brand Look & Feel Board + 4-Up Single-Page Metaphor Swap Board (4K PNGs).",
+                    "8-Slide 4K Widescreen Deck, 4-Page A4 Scientific Pamphlet PDF, and 1080p HD Video (.mp4).",
+                ],
+            },
         ],
     },
 ]
@@ -123,7 +230,9 @@ DEFAULT_GENERIC_SLIDES: List[Dict[str, Any]] = [
 def generate_4k_slide_deck(
     campaign_name: str,
     theme_prompt: str = "astrazeneca_light",
+    strapline: str = "TWO DISTINCT PATHWAYS. ONE BALANCED FORCE.",
     slides_data: Optional[List[Dict[str, Any]]] = None,
+    custom_slides_json: Optional[str] = None,
     include_az_logo: Optional[bool] = None,
     attached_image_path: Optional[str] = None,
     output_pdf_filename: str = "campaign_presentation_deck_4k.pdf",
@@ -132,18 +241,30 @@ def generate_4k_slide_deck(
 
     Automatically follows user branding prompts — e.g., Google white background + grey text +
     #4285F4 / #EA4335 / #FBBC04 / #34A853, or AstraZeneca Light/Dark format with official AZ logos.
+    Every slide includes extra-large executive typography (`88px` titles, `62px` card headers,
+    `54px` body bullets) paired with a 4K photographic visual panel or high-res chart.
     """
     settings = get_settings()
     theme: BrandTheme = parse_brand_theme(theme_prompt, include_az_logo=include_az_logo)
-    slides = slides_data if slides_data else DEFAULT_GENERIC_SLIDES
 
-    # Generate an evidence chart in the active theme for chart slides
+    parsed_custom: Optional[List[Dict[str, Any]]] = None
+    if custom_slides_json:
+        try:
+            loaded = json.loads(custom_slides_json)
+            if isinstance(loaded, list) and loaded:
+                parsed_custom = loaded
+        except Exception:
+            parsed_custom = None
+
+    slides = slides_data or parsed_custom or DEFAULT_GENERIC_SLIDES
+
+    # Generate an evidence chart and synergy diagram in the active theme
     chart_res = generate_campaign_chart_svg_and_png(
         chart_title=f"{campaign_name} — Complementary Multi-Endpoint Performance",
-        categories=["Primary Efficacy", "Organ Clearance", "Metabolic Rate", "Composite Response"],
-        series_primary_values=[88.0, 92.0, 84.0, 91.0],
+        categories=["Weight / Primary", "Hepatic Clearance", "Metabolic Rate", "Composite Response"],
+        series_primary_values=[89.0, 93.0, 85.0, 92.0],
         series_primary_label="Complementary Strategy",
-        series_secondary_values=[64.0, 52.0, 49.0, 61.0],
+        series_secondary_values=[64.0, 51.0, 48.0, 62.0],
         series_secondary_label="Single-Pathway Baseline",
         theme_prompt=theme_prompt,
         output_basename=f"{campaign_name.lower().replace(' ', '_')}_slide_chart",
@@ -152,10 +273,11 @@ def generate_4k_slide_deck(
 
     w, h = (3840, 2160)
     f_kicker = _load_font(44, bold=True)
-    f_title = _load_font(88, bold=True)
-    f_sub = _load_font(52, bold=True)
-    f_card_h = _load_font(62, bold=True)
-    f_body = _load_font(54, bold=False)
+    f_title = _load_font(86, bold=True)
+    f_sub = _load_font(50, bold=True)
+    f_card_h = _load_font(60, bold=True)
+    f_body = _load_font(52, bold=False)
+    f_cap = _load_font(36, bold=True)
     f_foot = _load_font(34, bold=False)
 
     palette = theme.palette_hex or [
@@ -165,6 +287,17 @@ def generate_4k_slide_deck(
         theme.success_hex,
     ]
     logo_img = get_pil_logo_for_theme(theme, max_height=88)
+
+    default_image_keys = [
+        "rowing_pair_4k",
+        "badminton_tandem_4k",
+        "glp1_pathway_4k",
+        "gcg_liver_4k",
+        "dual_helix_4k",
+        "organ_synergy_4k",
+        "vitality_couple_4k",
+        "sumo_equilibrium_4k",
+    ]
 
     slide_png_paths: List[str] = []
 
@@ -181,36 +314,38 @@ def generate_4k_slide_deck(
 
         # Kicker
         kicker = s_spec.get("kicker") or f"SLIDE {idx:02d}  ·  {campaign_name.upper()}"
-        draw.text((150, 95), kicker[:70], font=f_kicker, fill=(*theme.primary_rgb, 255))
+        draw.text((150, 88), kicker[:72], font=f_kicker, fill=(*theme.primary_rgb, 255))
 
         # Slide Number Badge
         badge_col = hex_to_rgb(palette[(idx - 1) % len(palette)])
-        draw.rounded_rectangle((w - 310, 80, w - 140, 165), radius=20, fill=(*badge_col, 255))
-        draw.text((w - 255, 96), f"{idx:02d}", font=_load_font(48, bold=True), fill=(255, 255, 255, 255))
+        draw.rounded_rectangle((w - 310, 75, w - 140, 160), radius=20, fill=(*badge_col, 255))
+        draw.text((w - 255, 91), f"{idx:02d}", font=_load_font(48, bold=True), fill=(255, 255, 255, 255))
 
-        # Title (88px)
+        # Title (86px)
         title_txt = s_spec.get("title", f"{campaign_name} Key Insight {idx}")
-        ty = 170
-        for line in _wrap_text(draw, title_txt, f_title, w - 520)[:2]:
+        ty = 160
+        for line in _wrap_text(draw, title_txt, f_title, w - 500)[:2]:
             draw.text((150, ty), line, font=f_title, fill=(*theme.text_primary_rgb, 255))
-            ty += 102
+            ty += 98
 
-        # Subtitle (52px)
-        sub_txt = s_spec.get("subtitle", "")
+        # Subtitle (50px)
+        sub_txt = s_spec.get("subtitle") or strapline
         if sub_txt:
-            draw.text((150, ty + 10), sub_txt[:85], font=f_sub, fill=(*theme.secondary_rgb, 255))
-            ty += 90
+            draw.text((150, ty + 8), sub_txt[:90], font=f_sub, fill=(*theme.secondary_rgb, 255))
+            ty += 84
 
         cards = s_spec.get("cards", [])
         include_chart = bool(s_spec.get("include_chart", False))
 
-        card_top = max(470, ty + 30)
-        card_bottom = h - 210
+        card_top = max(445, ty + 24)
+        card_bottom = h - 205
+
+        # Left column: 1 or 2 stacked executive cards; Right column: 4K photographic visual or chart
+        left_x0, left_x1 = 150, 2140
+        right_x0, right_x1 = 2200, w - 150
+        left_w = left_x1 - left_x0
 
         if include_chart and chart_png_path.exists():
-            # Left column card + Right column high-res chart
-            left_x0, left_x1 = 150, 1780
-            right_x0, right_x1 = 1840, w - 150
             c_rgb = hex_to_rgb(palette[0])
             draw.rounded_rectangle(
                 (left_x0, card_top, left_x1, card_bottom),
@@ -219,15 +354,18 @@ def generate_4k_slide_deck(
                 outline=(*c_rgb, 255),
                 width=6,
             )
+            draw.rounded_rectangle((left_x0, card_top, left_x1, card_top + 22), radius=10, fill=(*c_rgb, 255))
             if cards:
                 c0 = cards[0]
                 cy = card_top + 55
-                draw.text((left_x0 + 55, cy), c0.get("header", "Key Findings")[:38], font=f_card_h, fill=(*c_rgb, 255))
-                cy += 95
+                for hline in _wrap_text(draw, c0.get("header", "Key Findings"), f_card_h, left_w - 110)[:2]:
+                    draw.text((left_x0 + 55, cy), hline, font=f_card_h, fill=(*c_rgb, 255))
+                    cy += 74
+                cy += 24
                 for b in c0.get("bullets", [])[:4]:
-                    for bline in _wrap_text(draw, f"•  {b}", f_body, (left_x1 - left_x0) - 110)[:3]:
+                    for bline in _wrap_text(draw, f"•  {b}", f_body, left_w - 110)[:3]:
                         draw.text((left_x0 + 55, cy), bline, font=f_body, fill=(*theme.text_primary_rgb, 255))
-                        cy += 68
+                        cy += 66
                     cy += 26
 
             c_img = Image.open(chart_png_path).convert("RGBA")
@@ -245,33 +383,74 @@ def generate_4k_slide_deck(
             paste_y = card_top + ((card_bottom - card_top) - c_img.height) // 2
             img.paste(c_img, (paste_x, paste_y), c_img)
         else:
-            num_cards = max(1, min(3, len(cards)))
-            gap = 60
-            total_w = w - 300
-            cw = (total_w - gap * (num_cards - 1)) // num_cards
+            # Render stacked cards on the left (up to 2 cards) so text is wide, large, and uncluttered
+            num_cards = max(1, min(2, len(cards)))
+            gap_y = 44
+            avail_h = card_bottom - card_top
+            card_h = (avail_h - gap_y * (num_cards - 1)) // num_cards
+
             for c_i, card in enumerate(cards[:num_cards]):
-                x0 = 150 + c_i * (cw + gap)
-                x1 = x0 + cw
-                accent_col = hex_to_rgb(palette[c_i % len(palette)])
+                cy0 = card_top + c_i * (card_h + gap_y)
+                cy1 = cy0 + card_h
+                accent_col = hex_to_rgb(palette[(idx + c_i - 1) % len(palette)])
                 draw.rounded_rectangle(
-                    (x0, card_top, x1, card_bottom),
-                    radius=34,
+                    (left_x0, cy0, left_x1, cy1),
+                    radius=32,
                     fill=(*theme.card_background_rgb, 255),
                     outline=(*accent_col, 255),
                     width=6,
                 )
-                draw.rounded_rectangle((x0, card_top, x1, card_top + 22), radius=10, fill=(*accent_col, 255))
-                cy = card_top + 58
-                hdr = card.get("header", f"Pillar {c_i + 1}")
-                for hline in _wrap_text(draw, hdr, f_card_h, cw - 110)[:2]:
-                    draw.text((x0 + 55, cy), hline, font=f_card_h, fill=(*accent_col, 255))
-                    cy += 76
-                cy += 24
-                for b in card.get("bullets", [])[:4]:
-                    for bline in _wrap_text(draw, f"•  {b}", f_body, cw - 110)[:3]:
-                        draw.text((x0 + 55, cy), bline, font=f_body, fill=(*theme.text_primary_rgb, 255))
-                        cy += 68
-                    cy += 28
+                draw.rounded_rectangle((left_x0, cy0, left_x1, cy0 + 20), radius=10, fill=(*accent_col, 255))
+                cy = cy0 + 46
+                hdr = card.get("header", f"Strategic Pillar {c_i + 1}")
+                for hline in _wrap_text(draw, hdr, f_card_h, left_w - 110)[:2]:
+                    draw.text((left_x0 + 55, cy), hline, font=f_card_h, fill=(*accent_col, 255))
+                    cy += 72
+                cy += 18
+                for b in card.get("bullets", [])[:3]:
+                    for bline in _wrap_text(draw, f"•  {b}", f_body, left_w - 110)[:3]:
+                        if cy + 64 < cy1 - 24:
+                            draw.text((left_x0 + 55, cy), bline, font=f_body, fill=(*theme.text_primary_rgb, 255))
+                            cy += 64
+                    cy += 20
+
+            # Right column: 4K photographic visual panel from gallery
+            img_key = (
+                s_spec.get("image_key")
+                or f"{s_spec.get('title', '')} {s_spec.get('subtitle', '')}"
+            )
+            gal_path = resolve_gallery_image(str(img_key))
+            if gal_path is None:
+                gal_path = resolve_gallery_image(default_image_keys[(idx - 1) % len(default_image_keys)])
+
+            panel_w = right_x1 - right_x0
+            panel_h = card_bottom - card_top
+            accent_right = hex_to_rgb(palette[idx % len(palette)])
+            draw.rounded_rectangle(
+                (right_x0, card_top, right_x1, card_bottom),
+                radius=34,
+                fill=(*theme.card_background_rgb, 255),
+                outline=(*accent_right, 255),
+                width=6,
+            )
+            if gal_path and gal_path.exists():
+                photo = Image.open(gal_path).convert("RGBA")
+                img_box_h = panel_h - 130
+                photo_resized = photo.resize((panel_w - 24, img_box_h), Image.Resampling.LANCZOS)
+                img.paste(photo_resized, (right_x0 + 12, card_top + 12))
+
+                cap_txt = s_spec.get("visual_caption") or f"4K CAMPAIGN VISUAL  ·  SLIDE {idx:02d}"
+                draw.rounded_rectangle(
+                    (right_x0 + 12, card_bottom - 110, right_x1 - 12, card_bottom - 12),
+                    radius=20,
+                    fill=(*accent_right, 255),
+                )
+                draw.text(
+                    (right_x0 + 40, card_bottom - 82),
+                    cap_txt[:46],
+                    font=f_cap,
+                    fill=(255, 255, 255, 255),
+                )
 
         # Optional user-attached image badge in top-right if provided on Slide 1
         if idx == 1 and attached_image_path and Path(attached_image_path).exists():
@@ -286,7 +465,7 @@ def generate_4k_slide_deck(
         draw.line((150, h - 150, w - 150, h - 150), fill=(*theme.primary_rgb, 120), width=3)
         draw.text(
             (150, h - 115),
-            f"{theme.compliance_footer}   |   {campaign_name}   |   Slide {idx} of {len(slides)}",
+            f"{theme.compliance_footer}   |   {campaign_name}   |   {strapline[:48]}   |   Slide {idx} of {len(slides)}",
             font=f_foot,
             fill=(*theme.text_secondary_rgb, 255),
         )

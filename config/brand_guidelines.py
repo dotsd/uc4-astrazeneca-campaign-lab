@@ -306,3 +306,86 @@ def parse_brand_theme(
             f"AstraZeneca Campaign Lab  |  Palette: {' · '.join(palette[:4])}"
         ),
     )
+
+
+def load_scalable_font(size: int, bold: bool = False):
+    """Load a TrueType font guaranteed to scale to `size` pixels on both Linux containers and macOS."""
+    from pathlib import Path
+    from PIL import ImageFont
+
+    candidates: List[str] = []
+    try:
+        import matplotlib
+        from matplotlib.font_manager import FontProperties, findfont
+
+        mpl_ttf_dir = Path(matplotlib.get_data_path()) / "fonts" / "ttf"
+        if bold and (mpl_ttf_dir / "DejaVuSans-Bold.ttf").exists():
+            candidates.append(str(mpl_ttf_dir / "DejaVuSans-Bold.ttf"))
+        elif not bold and (mpl_ttf_dir / "DejaVuSans.ttf").exists():
+            candidates.append(str(mpl_ttf_dir / "DejaVuSans.ttf"))
+
+        fp = FontProperties(family="sans-serif", weight="bold" if bold else "normal")
+        found = findfont(fp, fallback_to_default=True)
+        if found:
+            candidates.append(found)
+    except Exception:
+        pass
+
+    if bold:
+        candidates.extend([
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        ])
+    else:
+        candidates.extend([
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        ])
+
+    for path in candidates:
+        if path and Path(path).exists():
+            try:
+                return ImageFont.truetype(path, size=size)
+            except Exception:
+                continue
+
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def resolve_gallery_image(key_or_prompt: str = "rowing"):
+    """Resolve a curated 4K Nano Banana Pro photographic gallery asset from `assets/gallery/`."""
+    from pathlib import Path
+
+    gallery_dir = Path(__file__).resolve().parent.parent / "assets" / "gallery"
+    q = (key_or_prompt or "").lower()
+
+    mapping = [
+        (("rowing_pair", "rowing", "row", "scull", "boat", "sunrise", "oars"), "rowing_pair_4k.jpg"),
+        (("dual_helix", "helix", "crystal", "molecule", "molecular", "receptor"), "dual_helix_4k.jpg"),
+        (("vitality_couple", "vitality", "couple", "walking", "stride", "patient", "horizon", "lifestyle"), "vitality_couple_4k.jpg"),
+        (("badminton_tandem", "badminton", "court", "racket"), "badminton_tandem_4k.jpg"),
+        (("sumo_equilibrium", "sumo", "equilibrium", "wrestl"), "sumo_equilibrium_4k.jpg"),
+        (("glp1_pathway", "glp-1", "glp1", "satiety", "incretin", "pillar 1"), "glp1_pathway_4k.jpg"),
+        (("gcg_liver", "glucagon", "gcg", "hepatic", "liver", "steatosis", "lipolysis", "pillar 2"), "gcg_liver_4k.jpg"),
+        (("organ_synergy", "organ", "synergy", "systemic", "cardiometabolic"), "organ_synergy_4k.jpg"),
+    ]
+    for keywords, filename in mapping:
+        if any(k in q for k in keywords):
+            cand = gallery_dir / filename
+            if cand.exists():
+                return cand
+
+    default_cand = gallery_dir / "rowing_pair_4k.jpg"
+    if default_cand.exists():
+        return default_cand
+    for f in sorted(gallery_dir.glob("*.jpg")):
+        return f
+    return None
+

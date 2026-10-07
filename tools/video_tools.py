@@ -21,6 +21,7 @@ Supports:
   mechanism walk-throughs, full slide deck narrations, and complementary strategy deep-dives)
 - Dynamic brand theme bar and lower-third captions styled in the user's chosen palette
   (Google 4-color, AstraZeneca Light/Dark, or custom hex codes).
+- Self-contained Linux/macOS `ffmpeg` resolution via `shutil.which("ffmpeg")` and `imageio_ffmpeg`.
 """
 from __future__ import annotations
 
@@ -35,12 +36,33 @@ from typing import Any, Dict, List, Optional
 
 from PIL import Image, ImageDraw
 
-from config.brand_guidelines import BrandTheme, hex_to_rgb, parse_brand_theme
+from config.brand_guidelines import (
+    BrandTheme,
+    hex_to_rgb,
+    parse_brand_theme,
+    resolve_gallery_image,
+)
 from config.settings import get_settings
 from tools.image_tools import _load_font, _wrap_text, generate_4k_campaign_key_visual
 from tools.logo_tools import get_pil_logo_for_theme
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_ffmpeg_binary() -> Optional[str]:
+    """Locate ffmpeg from system PATH or bundled imageio-ffmpeg binary (works in Linux containers)."""
+    sys_ff = shutil.which("ffmpeg")
+    if sys_ff:
+        return sys_ff
+    try:
+        import imageio_ffmpeg
+
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe and Path(exe).exists():
+            return str(exe)
+    except Exception as exc:
+        logger.warning("imageio_ffmpeg fallback failed: %s", exc)
+    return None
 
 
 def _synthesize_ambient_chord_wav(wav_path: Path, duration_sec: float) -> Path:
@@ -102,22 +124,70 @@ def generate_campaign_video_mp4(
 
     if mode == "long":
         default_scenes = [
-            {"title": f"{campaign_name}: Strategic Vision", "subtitle": strapline},
-            {"title": "Addressing Complex Multi-System Disease", "subtitle": "Moving beyond single-pathway monotherapy limitations"},
-            {"title": "Pillar 1: Central & Systemic Control", "subtitle": "Targeted receptor engagement driving foundational efficacy"},
-            {"title": "Pillar 2: Direct Organ Energy Mobilization", "subtitle": "Unlocking hepatic lipid clearance and metabolic expenditure"},
-            {"title": "Complementary Dual-Pathway Synergy", "subtitle": "Two distinct pathways working in synchronized balance"},
-            {"title": "High-Quality Body Composition & Organ Health", "subtitle": "Deep fat reduction while preserving lean tissue integrity"},
-            {"title": "Broad Cardiometabolic & Systemic Impact", "subtitle": "Addressing interconnected clinical priorities simultaneously"},
-            {"title": f"{campaign_name} — Omnichannel Launch Ready", "subtitle": strapline},
+            {
+                "title": f"{campaign_name}: Strategic Vision",
+                "subtitle": strapline,
+                "image_key": "rowing_pair_4k",
+            },
+            {
+                "title": "Addressing Complex Multi-System Disease",
+                "subtitle": "Moving beyond single-pathway monotherapy limitations",
+                "image_key": "dual_helix_4k",
+            },
+            {
+                "title": "Pillar 1: Central & Systemic Control",
+                "subtitle": "Targeted receptor engagement driving foundational efficacy",
+                "image_key": "glp1_pathway_4k",
+            },
+            {
+                "title": "Pillar 2: Direct Organ Energy Mobilization",
+                "subtitle": "Unlocking hepatic lipid clearance and metabolic expenditure",
+                "image_key": "gcg_liver_4k",
+            },
+            {
+                "title": "Complementary Dual-Pathway Synergy",
+                "subtitle": "Two distinct pathways working in synchronized balance",
+                "image_key": "organ_synergy_4k",
+            },
+            {
+                "title": "High-Quality Body Composition & Organ Health",
+                "subtitle": "Deep fat reduction while preserving lean tissue integrity",
+                "image_key": "vitality_couple_4k",
+            },
+            {
+                "title": "Broad Cardiometabolic & Systemic Impact",
+                "subtitle": "Addressing interconnected clinical priorities simultaneously",
+                "image_key": "badminton_tandem_4k",
+            },
+            {
+                "title": f"{campaign_name} — Omnichannel Launch Ready",
+                "subtitle": strapline,
+                "image_key": "rowing_pair_4k",
+            },
         ]
         sec_per_scene = 8.0
     else:
         default_scenes = [
-            {"title": f"{campaign_name}: Complementary Strategy", "subtitle": strapline},
-            {"title": "Pillar 1 + Pillar 2 Working in Tandem", "subtitle": "Combining systemic regulation with direct organ mobilization"},
-            {"title": "Superior Multi-System Clinical Impact", "subtitle": "Synchronized efficacy across weight, organ lipid clearance & metabolism"},
-            {"title": strapline, "subtitle": f"{campaign_name}  ·  Scientific & Commercial Studio"},
+            {
+                "title": f"{campaign_name}: Complementary Strategy",
+                "subtitle": strapline,
+                "image_key": "rowing_pair_4k",
+            },
+            {
+                "title": "Pillar 1: Central Satiety & Glycemic Regulation",
+                "subtitle": "Targeted GLP-1 / primary pathway signaling for foundational control",
+                "image_key": "glp1_pathway_4k",
+            },
+            {
+                "title": "Pillar 2: Direct Hepatic Lipid Clearance & Energy Expenditure",
+                "subtitle": "Complementary GCG / secondary pathway mobilization across organs",
+                "image_key": "gcg_liver_4k",
+            },
+            {
+                "title": strapline,
+                "subtitle": f"{campaign_name}  ·  Synchronized Multi-Organ Outcomes",
+                "image_key": "organ_synergy_4k",
+            },
         ]
         sec_per_scene = 5.0
 
@@ -140,20 +210,39 @@ def generate_campaign_video_mp4(
     valid_existing = [
         Path(p) for p in (existing_frame_paths or []) if p and Path(p).exists()
     ]
-    if not valid_existing:
-        kv_res = generate_4k_campaign_key_visual(
-            campaign_name=campaign_name,
-            headline=f"{campaign_name}: {strapline}",
-            strapline=strapline,
-            theme_prompt=theme_prompt,
-            include_az_logo=include_az_logo,
-            output_filename=f"{campaign_name.lower().replace(' ', '_')}_video_base_4k.png",
-        )
-        valid_existing = [Path(kv_res["image_path"])]
+    scene_gallery_defaults = [
+        "rowing_pair_4k",
+        "glp1_pathway_4k",
+        "gcg_liver_4k",
+        "organ_synergy_4k",
+        "dual_helix_4k",
+        "vitality_couple_4k",
+        "badminton_tandem_4k",
+        "sumo_equilibrium_4k",
+    ]
 
     scene_frame_paths: List[Path] = []
     for idx, sc in enumerate(scenes):
-        src_img_path = valid_existing[idx % len(valid_existing)]
+        if len(valid_existing) >= len(scenes):
+            src_img_path = valid_existing[idx % len(valid_existing)]
+        else:
+            img_key = sc.get("image_key") or scene_gallery_defaults[idx % len(scene_gallery_defaults)]
+            gal_path = resolve_gallery_image(img_key)
+            if gal_path and gal_path.exists():
+                src_img_path = gal_path
+            elif valid_existing:
+                src_img_path = valid_existing[idx % len(valid_existing)]
+            else:
+                kv_res = generate_4k_campaign_key_visual(
+                    campaign_name=campaign_name,
+                    headline=f"{campaign_name}: {strapline}",
+                    strapline=strapline,
+                    theme_prompt=theme_prompt,
+                    include_az_logo=include_az_logo,
+                    output_filename=f"{campaign_name.lower().replace(' ', '_')}_video_base_4k.png",
+                )
+                src_img_path = Path(kv_res["image_path"])
+
         base_img = Image.open(src_img_path).convert("RGBA").resize((vw, vh), Image.Resampling.LANCZOS)
 
         overlay = Image.new("RGBA", (vw, vh), (0, 0, 0, 0))
@@ -216,7 +305,7 @@ def generate_campaign_video_mp4(
     _synthesize_ambient_chord_wav(wav_path, total_duration)
 
     out_mp4 = settings.output_dir / output_filename
-    ffmpeg_bin = shutil.which("ffmpeg")
+    ffmpeg_bin = _resolve_ffmpeg_binary()
     if ffmpeg_bin:
         concat_file = settings.output_dir / "_vid_concat.txt"
         lines = []

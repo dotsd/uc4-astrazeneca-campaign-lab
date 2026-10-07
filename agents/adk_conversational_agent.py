@@ -15,10 +15,10 @@
 """True Google ADK Agentic Conversational Orchestrator for AstraZeneca Campaign Lab.
 
 Uses `genai.Client(vertexai=True, location="global")` with Gemini 3.1 Pro Preview
-(`gemini-3.1-pro-preview`) and `gemini-3-pro-image` so it runs reliably inside the
-`europe-west1` Vertex AI Agent Engine runtime while accessing global Gemini 3.x models,
-Google Search Grounding, native ADK in-chat artifact attachments, and verified 7-day
-V4 Signed URLs.
+(`gemini-3.1-pro-preview`) and `gemini-2.5-flash-image` / Nano Banana Pro 4K gallery
+so it runs reliably inside the `europe-west1` Vertex AI Agent Engine runtime while
+accessing global Gemini 3.1 Pro models, multimodal PDF/image reading, Google Search
+Grounding, native ADK in-chat artifact attachments, and verified 7-day V4 Signed URLs.
 """
 from __future__ import annotations
 
@@ -53,6 +53,7 @@ from tools.grounding_tools import (
 from tools.image_tools import (
     generate_4k_campaign_key_visual,
     generate_brand_look_and_feel_variations_4k,
+    generate_single_page_metaphor_swap_board_4k,
 )
 from tools.logo_tools import (
     ensure_astrazeneca_logo_assets,
@@ -324,9 +325,25 @@ def restore_verified_signed_urls_in_text(
     text: str,
     verified_urls: Optional[Dict[str, str]] = None,
 ) -> str:
-    """Restore exact pre-flight verified V4 Signed URLs if the LLM truncated X-Goog-Signature."""
+    """Restore exact V4 Signed URLs and convert `![label](url)` into clean clickable links for Gemini Enterprise."""
     if not text:
         return text
+
+    # Remove any trailing LLM self-correction monologue if present
+    text = re.sub(
+        r"\n*Wait\s*[—\-]+\s*I notice[^\n]*(?:\n.*)?$",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
+
+    # Convert Markdown image syntax `![Label](https://storage...)` into clean clickable links
+    # because Gemini Enterprise chat UI prints raw 700-char URLs if prefixed with `!`
+    text = re.sub(
+        r"!\[([^\]]+)\]\((https://storage\.(?:googleapis|cloud\.google)\.com/[^\)]+)\)",
+        r"[🖼️ View / Download \1](\2)",
+        text,
+    )
 
     lookup = dict(_VERIFIED_SIGNED_URLS_REGISTRY)
     if verified_urls:
@@ -368,7 +385,7 @@ def preserve_verified_signed_urls_callback(
     llm_response: Optional[Any] = None,
     **kwargs: Any,
 ) -> Optional[Any]:
-    """ADK `after_model_callback` ensuring the LLM never truncates or alters V4 `X-Goog-Signature` URLs."""
+    """ADK `after_model_callback` ensuring the LLM never truncates V4 `X-Goog-Signature` URLs or emits raw `![...]`."""
     session_urls: Dict[str, str] = {}
     if callback_context is not None:
         state = getattr(callback_context, "state", None)
@@ -403,7 +420,7 @@ class AstraZenecaCampaignLabADKAgent:
 
         if self.session_id not in _SESSION_STATES:
             _SESSION_STATES[self.session_id] = {
-                "campaign_name": "AZD9550 Dual Agonist",
+                "campaign_name": "AZD9550",
                 "theme_prompt": "astrazeneca_light",
                 "master_strapline": "TWO DISTINCT PATHWAYS. ONE BALANCED FORCE.",
                 "video_length_mode": "short",
@@ -433,6 +450,7 @@ class AstraZenecaCampaignLabADKAgent:
         self,
         user_message: str,
         tool_context: Optional[Any] = None,
+        multimodal_parts: Optional[List[types.Part]] = None,
     ) -> Dict[str, Any]:
         """Execute agentic reasoning with Gemini 3.1 Pro Preview on `global` endpoint and live tool invocation."""
         active_tool_ctx = tool_context or self.tool_context
@@ -450,7 +468,7 @@ class AstraZenecaCampaignLabADKAgent:
         elif "astrazeneca" in msg_lower and "light" in msg_lower:
             self.state["theme_prompt"] = "astrazeneca_light"
 
-        if "long video" in msg_lower or "60s" in msg_lower or "long" in msg_lower:
+        if "long video" in msg_lower or "60s" in msg_lower or "64s" in msg_lower:
             self.state["video_length_mode"] = "long"
 
         # Define session-bound tools that automatically upload to GCS & attach native artifacts
@@ -465,13 +483,13 @@ class AstraZenecaCampaignLabADKAgent:
             )
 
         def tool_generate_4k_key_visual_and_look_and_feel(
-            campaign_name: str = "AZD9550 Dual Agonist",
+            campaign_name: str = "AZD9550",
             headline: str = "Complementary Dual-Pathway Strategy",
             master_strapline: str = "TWO DISTINCT PATHWAYS. ONE BALANCED FORCE.",
             visual_metaphor_prompt: str = "Synchronized coastal rowing pair at golden sunrise over glass-calm teal water, ultra-detailed 4K commercial photography",
             theme_prompt: str = "",
         ) -> Dict[str, Any]:
-            """Generate a 4K Hero Key Visual and a 3-Up Brand Look & Feel Comparison Board with a Single Master Strapline and Anchor Recommendation."""
+            """Generate a 4K Hero Key Visual, a 3-Up Brand Look & Feel Comparison Board (Rowing, Helix, Vitality Couple), AND a 4-Up Single-Page Metaphor Swap Board (Rowing Anchor vs. Badminton, Sumo & Vitality)."""
             active_theme = theme_prompt or self.state.get("theme_prompt", "astrazeneca_light")
             self.state["campaign_name"] = campaign_name
             self.state["master_strapline"] = master_strapline
@@ -489,18 +507,31 @@ class AstraZenecaCampaignLabADKAgent:
                 master_strapline=master_strapline,
                 theme_prompt=active_theme,
             )
+            swap_res = generate_single_page_metaphor_swap_board_4k(
+                campaign_name=campaign_name,
+                master_strapline=master_strapline,
+                theme_prompt=active_theme,
+            )
 
             kv_path = Path(kv_res["image_path"])
             lf_path = Path(lf_res["board_image_path"])
+            swap_path = Path(swap_res["swap_board_image_path"])
+
             kv_url = upload_to_gcs(kv_path, self.session_id, tool_context=active_tool_ctx)
             lf_url = upload_to_gcs(lf_path, self.session_id, tool_context=active_tool_ctx)
+            swap_url = upload_to_gcs(swap_path, self.session_id, tool_context=active_tool_ctx)
+
             self._register_signed_url(kv_path, kv_url)
             self._register_signed_url(lf_path, lf_url)
+            self._register_signed_url(swap_path, swap_url)
 
-            self.state["turn_artifacts"]["hero_4k"] = str(kv_path)
             self.state["turn_artifacts"]["look_and_feel_4k"] = str(lf_path)
-            self.state.setdefault("last_deliverables", {})["hero_4k_url"] = kv_url
-            self.state["last_deliverables"]["look_and_feel_4k_url"] = lf_url
+            self.state["turn_artifacts"]["single_page_variations_4k"] = str(swap_path)
+            self.state["turn_artifacts"]["hero_4k"] = str(kv_path)
+
+            self.state.setdefault("last_deliverables", {})["look_and_feel_4k_url"] = lf_url
+            self.state["last_deliverables"]["single_page_variations_4k_url"] = swap_url
+            self.state["last_deliverables"]["hero_4k_url"] = kv_url
 
             return {
                 "status": "success",
@@ -508,22 +539,28 @@ class AstraZenecaCampaignLabADKAgent:
                 "master_strapline": master_strapline,
                 "recommended_anchor": lf_res["recommended_anchor"],
                 "anchor_rationale": lf_res["anchor_rationale"],
-                "hero_4k_https_url": kv_url,
                 "look_and_feel_board_https_url": lf_url,
+                "single_page_metaphor_variations_board_https_url": swap_url,
+                "hero_4k_https_url": kv_url,
             }
 
         def tool_generate_4k_slide_deck(
-            campaign_name: str = "AZD9550 Dual Agonist",
+            campaign_name: str = "AZD9550",
+            master_strapline: str = "TWO DISTINCT PATHWAYS. ONE BALANCED FORCE.",
             theme_prompt: str = "",
+            custom_slides_json: str = "",
         ) -> Dict[str, Any]:
-            """Generate a 4K Widescreen Slide Deck (3840x2160 PNGs + Widescreen PDF) with extra-large typography following user brand colors or AstraZeneca format."""
+            """Generate an 8-Slide 4K Widescreen Slide Deck (3840x2160 PNGs + Widescreen PDF) with extra-large typography and 4K visual panels."""
             active_theme = theme_prompt or self.state.get("theme_prompt", "astrazeneca_light")
             self.state["campaign_name"] = campaign_name
+            self.state["master_strapline"] = master_strapline
             self.state["theme_prompt"] = active_theme
 
             deck_res = generate_4k_slide_deck(
                 campaign_name=campaign_name,
+                strapline=master_strapline,
                 theme_prompt=active_theme,
+                custom_slides_json=custom_slides_json or None,
             )
             pdf_path = Path(deck_res["pdf_deck_path"])
             pdf_url = upload_to_gcs(pdf_path, self.session_id, tool_context=active_tool_ctx)
@@ -531,9 +568,11 @@ class AstraZenecaCampaignLabADKAgent:
             self.state["turn_artifacts"]["slide_deck_pdf"] = str(pdf_path)
 
             slide_urls: List[str] = []
-            for idx, sp_str in enumerate(deck_res["slide_png_paths"][:4], start=1):
+            for idx, sp_str in enumerate(deck_res["slide_png_paths"], start=1):
                 sp = Path(sp_str)
-                s_url = upload_to_gcs(sp, self.session_id, tool_context=active_tool_ctx)
+                # Attach Slide 1 and Slide 6 as native preview cards, upload all 8 to GCS
+                tc_for_slide = active_tool_ctx if idx in (1, 6) else None
+                s_url = upload_to_gcs(sp, self.session_id, tool_context=tc_for_slide)
                 self._register_signed_url(sp, s_url)
                 slide_urls.append(s_url)
                 if idx == 1:
@@ -546,6 +585,7 @@ class AstraZenecaCampaignLabADKAgent:
             return {
                 "status": "success",
                 "campaign_name": campaign_name,
+                "slide_count": len(slide_urls),
                 "theme_id": deck_res["theme_id"],
                 "palette_hex": deck_res["palette_hex"],
                 "slide_deck_pdf_https_url": pdf_url,
@@ -554,9 +594,14 @@ class AstraZenecaCampaignLabADKAgent:
             }
 
         def tool_generate_extended_pamphlet_pdf(
-            campaign_name: str = "AZD9550 Dual Agonist",
+            campaign_name: str = "AZD9550",
             master_strapline: str = "TWO DISTINCT PATHWAYS. ONE BALANCED FORCE.",
-            executive_summary: str = "An integrated scientific and commercial summary of complementary dual-pathway mechanisms and clinical outcomes.",
+            executive_summary: str = (
+                "An integrated scientific and clinical summary synthesizing complementary dual-pathway "
+                "mechanisms, hepatic and systemic metabolic remodeling, and multi-organ outcomes."
+            ),
+            pillar_1_title: str = "Pillar 1: Central Satiety & Glycemic Control (GLP-1R)",
+            pillar_2_title: str = "Pillar 2: Direct Hepatic Lipid Clearance & Energy Expenditure (GCGR)",
             theme_prompt: str = "",
         ) -> Dict[str, Any]:
             """Generate a 4-Page A4 Scientific & Commercial Information Pamphlet PDF + page PNGs with vector logos and charts."""
@@ -569,6 +614,8 @@ class AstraZenecaCampaignLabADKAgent:
                 campaign_name=campaign_name,
                 strapline=master_strapline,
                 executive_summary=executive_summary,
+                pillar_1_title=pillar_1_title,
+                pillar_2_title=pillar_2_title,
                 theme_prompt=active_theme,
             )
             pdf_path = Path(pam_res["pamphlet_pdf_path"])
@@ -595,7 +642,7 @@ class AstraZenecaCampaignLabADKAgent:
             }
 
         def tool_generate_svg_charts_and_logos(
-            campaign_name: str = "AZD9550 Dual Agonist",
+            campaign_name: str = "AZD9550",
             chart_title: str = "Complementary Multi-System Efficacy & Synergy",
             theme_prompt: str = "",
         ) -> Dict[str, Any]:
@@ -603,7 +650,7 @@ class AstraZenecaCampaignLabADKAgent:
             active_theme = theme_prompt or self.state.get("theme_prompt", "astrazeneca_light")
             chart_res = generate_campaign_chart_svg_and_png(
                 chart_title=chart_title,
-                categories=["Primary Efficacy", "Organ Clearance", "Energy Balance", "Composite Benefit"],
+                categories=["Weight / Primary", "Hepatic Clearance", "Energy Expenditure", "Composite Benefit"],
                 series_primary_values=[89.0, 93.0, 86.0, 92.0],
                 series_secondary_values=[64.0, 51.0, 48.0, 62.0],
                 theme_prompt=active_theme,
@@ -635,6 +682,10 @@ class AstraZenecaCampaignLabADKAgent:
             self.state["turn_artifacts"]["evidence_chart_png"] = str(c_png)
             self.state["turn_artifacts"]["synergy_diagram_png"] = str(s_png)
 
+            self.state.setdefault("last_deliverables", {})["chart_png_url"] = c_png_url
+            self.state["last_deliverables"]["chart_svg_url"] = c_svg_url
+            self.state["last_deliverables"]["synergy_png_url"] = s_png_url
+
             return {
                 "status": "success",
                 "chart_png_https_url": c_png_url,
@@ -644,7 +695,7 @@ class AstraZenecaCampaignLabADKAgent:
             }
 
         def tool_generate_campaign_video(
-            campaign_name: str = "AZD9550 Dual Agonist",
+            campaign_name: str = "AZD9550",
             master_strapline: str = "TWO DISTINCT PATHWAYS. ONE BALANCED FORCE.",
             video_length_mode: str = "short",
             theme_prompt: str = "",
@@ -672,7 +723,7 @@ class AstraZenecaCampaignLabADKAgent:
                 "duration_seconds": vid_res["duration_seconds"],
             }
 
-        system_instruction = f"""You are **AstraZeneca Campaign Lab**, AstraZeneca's autonomous creative, brand, and scientific communications multi-agent studio powered by Google ADK (`{settings.MODEL_TIER}`), Google Search Grounding, and live `{settings.IMAGEN_MODEL}` ("Nano Banana Pro") 4K image generation.
+        system_instruction = f"""You are **AstraZeneca Campaign Lab**, AstraZeneca's autonomous creative, brand, and scientific communications multi-agent studio powered by Google ADK (`{settings.MODEL_TIER}`), Google Search Grounding, and Nano Banana Pro 4K image generation.
 
 Current Session Context:
 - Active Campaign / Product: {self.state.get('campaign_name')}
@@ -682,31 +733,23 @@ Current Session Context:
 CRITICAL INSTRUCTIONS:
 1. **100% GENERIC MULTI-BRAND & MULTI-CAMPAIGN STUDIO**:
    - You support ANY therapeutic area, investigational molecule (e.g., AZD9550), commercial brand, or corporate initiative.
-   - Never assume or inject Calquence branding unless the user explicitly asks about Calquence.
+   - Never inject Calquence branding or logos onto deliverables unless explicitly requested.
 
-2. **ON INITIAL GREETING ("Hi", "Hello", "Hey", "Start")**:
-   - Respond with a warm, concise executive welcome introducing **AstraZeneca Campaign Lab**:
-     "Hello and welcome to **AstraZeneca Campaign Lab**!
+2. **ACCURATE READING OF ATTACHED SLIDE DECKS / PDFS**:
+   - When the user attaches a PDF or slide deck, carefully ground your scientific summary, mechanism pillars, and campaign strategy in the uploaded document's content.
 
-     I am your creative and scientific campaign partner. Attach a slide deck, document, or image—or ask me any clinical or brand question backed by **Google Search Grounding**—and I can produce:
+3. **BRAND LOOK & FEEL + SINGLE-PAGE VARIATIONS + SINGLE MASTER STRAPLINE**:
+   - Recommend ONE unifying **Single Master Strapline** (e.g., `"TWO DISTINCT PATHWAYS. ONE BALANCED FORCE."`).
+   - Present 3 distinct visual directions (Concept 1: Synchronized Rowing Pair [RECOMMENDED ANCHOR], Concept 2: Crystalline Dual Helix, Concept 3: Renewed Vitality Couple).
+   - Also highlight the **4-Up Single-Page Metaphor Swap Board** showing how the single-page layout swaps the Rowing Anchor with Badminton Tandem, Sumo Equilibrium, and Vitality Couple while keeping the layout and single strapline constant.
 
-     • **Brand Look & Feel & Single Master Strapline** — 3 distinct 4K visual directions with a recommended **Anchor Look & Feel**.
-     • **4K Widescreen Slide Deck** — `3840 × 2160` 4K slides and compiled PDF deck with extra-large executive typography.
-     • **Information Pamphlet & Agency Brief** — Multi-page A4 print-ready PDF brochures and Word `.docx` briefs with vector logos.
-     • **Vector SVG Charts, Diagrams & Logos** — Publication-grade `.svg` and `450-DPI .png` infographics.
-     • **Campaign Videos (`.mp4`)** — Short (`20s`) or Long (`64s`) 1080p HD narrated videos.
-
-     **Brand Theme Options:**
-     Would you like to use **AstraZeneca Corporate Format** (with official AstraZeneca vector logos and Mulberry/Gold/Navy or Dark Metabolic Plum palette), or a **Custom Brand Color Palette** (for example, white background, grey text, and custom Hex/RGB colors)?
-
-     How would you like to begin?"
-
-3. **DYNAMIC BRAND THEME & COLOR PALETTE ENGINE**:
+4. **DYNAMIC BRAND THEME & COLOR PALETTE ENGINE**:
    - If the user specifies custom colors (e.g., *"use white background for the slides, grey color for text and following branding colors below: Blue: Hex #4285F4, Red: Hex #EA4335, Yellow: Hex #FBBC04, Green: Hex #34A853"*), pass their exact instruction into `theme_prompt` across all tools.
-   - If the user has not specified a color theme when asking for slides or a brochure, you may generate using AstraZeneca format or ask if they prefer AstraZeneca format vs. a custom color palette.
 
-4. **ALWAYS INCLUDE INLINE PREVIEWS & VERIFIED 7-DAY V4 SIGNED URLS**:
-   - Whenever you call generation tools, embed the returned HTTPS URLs as Markdown image previews (`![Preview](<https_url>)`) and clickable download links (`[📥 Download Deliverable](<https_url>)`). Never truncate `X-Goog-Signature` parameters.
+5. **CLEAN CLICKABLE HYPERLINKS (NEVER USE `![alt](url)` IMAGE TAGS)**:
+   - Format all deliverable URLs strictly as standard clickable Markdown links: `[📥 Download Deliverable Name](<https_url>)`.
+   - NEVER prefix signed URLs with `!` (do NOT write `![Preview](<https_url>)`), because Gemini Enterprise renders `[Label](<https_url>)` as a clean hyperlink whereas `![Label](<https_url>)` prints raw URL text.
+   - NEVER output intermediate self-correction thoughts like "Wait — I notice...". Call all required tools first, then output one cohesive executive response.
 """
 
         is_greeting = msg_lower in (
@@ -724,8 +767,8 @@ CRITICAL INSTRUCTIONS:
                 "Hello and welcome to **AstraZeneca Campaign Lab**!\n\n"
                 "I am your creative and scientific campaign partner. Attach a slide deck, document, or image—"
                 "or ask me any clinical, scientific, or market question backed by **Google Search Grounding**—and I can produce:\n\n"
-                "• **Brand Look & Feel & Single Master Strapline** — 3 distinct 4K visual directions with a recommended **Anchor Look & Feel**.\n"
-                "• **4K Widescreen Slide Deck** — `3840 × 2160` 4K slides and compiled PDF deck with extra-large executive typography.\n"
+                "• **Brand Look & Feel & Single Master Strapline** — 3 distinct 4K visual directions with a recommended **Anchor Look & Feel**, plus a **4-Up Single-Page Metaphor Variations Board**.\n"
+                "• **4K Widescreen Slide Deck** — `3840 × 2160` 4K slides and compiled PDF deck with extra-large executive typography (`86px` titles, `60px` headers, `52px` body) and embedded 4K photography.\n"
                 "• **Information Pamphlet & Agency Brief** — Multi-page A4 print-ready PDF brochures and Word `.docx` briefs with official vector logos.\n"
                 "• **Vector SVG Charts, Diagrams & Logos** — Publication-grade `.svg` and `450-DPI .png` infographics.\n"
                 "• **Campaign Videos (`.mp4`)** — Short (`20s`) or Long (`64s`) 1080p HD campaign videos.\n\n"
@@ -743,13 +786,13 @@ CRITICAL INSTRUCTIONS:
                 )
 
                 contents = []
-                for turn in self.state["history"][-10:]:
+                history_turns = self.state["history"][-10:]
+                for idx_t, turn in enumerate(history_turns):
                     role = "user" if turn["role"] == "user" else "model"
-                    contents.append(
-                        types.Content(
-                            role=role, parts=[types.Part(text=turn["content"])]
-                        )
-                    )
+                    parts_for_turn: List[types.Part] = [types.Part(text=turn["content"])]
+                    if idx_t == len(history_turns) - 1 and role == "user" and multimodal_parts:
+                        parts_for_turn.extend(multimodal_parts)
+                    contents.append(types.Content(role=role, parts=parts_for_turn))
 
                 response = None
                 for llm_model in settings.llm_model_candidates:
@@ -760,6 +803,9 @@ CRITICAL INSTRUCTIONS:
                             config=types.GenerateContentConfig(
                                 system_instruction=system_instruction,
                                 temperature=0.2,
+                                automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                                    maximum_remote_calls=12
+                                ),
                                 tools=[
                                     tool_google_search_grounding,
                                     tool_generate_4k_key_visual_and_look_and_feel,
@@ -780,86 +826,134 @@ CRITICAL INSTRUCTIONS:
                         )
                         continue
 
-                response_md = response.text if (response and response.text) else ""
+                if response:
+                    # Extract only the final candidate's text parts (avoid concatenating intermediate AFC self-talk)
+                    final_parts_text = []
+                    if getattr(response, "candidates", None):
+                        cand0 = response.candidates[0]
+                        if getattr(cand0, "content", None) and getattr(cand0.content, "parts", None):
+                            for p in cand0.content.parts:
+                                if getattr(p, "text", None):
+                                    final_parts_text.append(p.text)
+                    response_md = "\n".join(final_parts_text).strip() or (response.text or "")
             except Exception as err:
                 logger.error("Gemini agentic execution error: %s", err)
                 response_md = ""
 
-        # Deterministic Deliverable Safeguard if user asked for deliverables and none were triggered
-        wants_generation = any(
+        # Deterministic Deliverable Completeness Safeguard:
+        # Ensure every deliverable requested by the user was generated and has clean clickable download links.
+        wants_look_and_feel = any(
             kw in msg_lower
-            for kw in (
-                "auto mode",
-                "generate",
-                "slide",
-                "deck",
-                "pamphlet",
-                "brochure",
-                "video",
-                "look and feel",
-                "strapline",
-                "4k",
-                "svg",
-                "chart",
-            )
+            for kw in ("look and feel", "brand", "strapline", "swimmer", "variation", "4k", "image", "picture", "campaign", "auto mode")
         )
-        if wants_generation and not is_greeting and not self.state.get("turn_artifacts"):
+        wants_slides = any(
+            kw in msg_lower
+            for kw in ("slide", "deck", "presentation", "4k", "campaign", "auto mode")
+        )
+        wants_pamphlet = any(
+            kw in msg_lower
+            for kw in ("pamphlet", "brochure", "summary of the slides", "information", "campaign", "auto mode")
+        )
+        wants_video = any(
+            kw in msg_lower
+            for kw in ("video", "mp4", "complimentary", "complementary", "campaign", "auto mode")
+        )
+        wants_svg = any(
+            kw in msg_lower
+            for kw in ("svg", "chart", "graph", "diagram")
+        )
+
+        if not is_greeting and (wants_look_and_feel or wants_slides or wants_pamphlet or wants_video or wants_svg):
             try:
-                active_camp = self.state.get("campaign_name", "AZD9550 Dual Agonist")
+                active_camp = self.state.get("campaign_name", "AZD9550")
                 active_strap = self.state.get(
                     "master_strapline", "TWO DISTINCT PATHWAYS. ONE BALANCED FORCE."
                 )
                 active_theme = self.state.get("theme_prompt", "astrazeneca_light")
                 vid_mode = self.state.get("video_length_mode", "short")
 
-                lf_out = tool_generate_4k_key_visual_and_look_and_feel(
-                    campaign_name=active_camp,
-                    master_strapline=active_strap,
-                    theme_prompt=active_theme,
-                )
-                deck_out = tool_generate_4k_slide_deck(
-                    campaign_name=active_camp,
-                    theme_prompt=active_theme,
-                )
-                pam_out = tool_generate_extended_pamphlet_pdf(
-                    campaign_name=active_camp,
-                    master_strapline=active_strap,
-                    theme_prompt=active_theme,
-                )
-                svg_out = tool_generate_svg_charts_and_logos(
-                    campaign_name=active_camp,
-                    theme_prompt=active_theme,
-                )
-                vid_out = tool_generate_campaign_video(
-                    campaign_name=active_camp,
-                    master_strapline=active_strap,
-                    video_length_mode=vid_mode,
-                    theme_prompt=active_theme,
-                )
+                if wants_look_and_feel and "look_and_feel_4k" not in self.state["turn_artifacts"]:
+                    tool_generate_4k_key_visual_and_look_and_feel(
+                        campaign_name=active_camp,
+                        master_strapline=active_strap,
+                        theme_prompt=active_theme,
+                    )
+                if wants_slides and "slide_deck_pdf" not in self.state["turn_artifacts"]:
+                    tool_generate_4k_slide_deck(
+                        campaign_name=active_camp,
+                        master_strapline=active_strap,
+                        theme_prompt=active_theme,
+                    )
+                if wants_pamphlet and "pamphlet_pdf" not in self.state["turn_artifacts"]:
+                    tool_generate_extended_pamphlet_pdf(
+                        campaign_name=active_camp,
+                        master_strapline=active_strap,
+                        theme_prompt=active_theme,
+                    )
+                if wants_svg and "evidence_chart_png" not in self.state["turn_artifacts"]:
+                    tool_generate_svg_charts_and_logos(
+                        campaign_name=active_camp,
+                        theme_prompt=active_theme,
+                    )
+                if wants_video and "campaign_video_mp4" not in self.state["turn_artifacts"]:
+                    tool_generate_campaign_video(
+                        campaign_name=active_camp,
+                        master_strapline=active_strap,
+                        video_length_mode=vid_mode,
+                        theme_prompt=active_theme,
+                    )
 
-                card = (
-                    f"### ✅ Complete Campaign Lab Deliverables ({active_camp})\n"
-                    f"**Single Master Strapline:** *\"{active_strap}\"*  \n"
-                    f"**Recommended Anchor Look & Feel:** **{lf_out['recommended_anchor']}**  \n"
-                    f"**Active Theme Palette:** `{deck_out['palette_hex']}`\n\n"
-                    f"#### 🎨 1. 3-Up Brand Look & Feel Board & 4K Hero Visual\n"
-                    f"![3-Up Brand Look & Feel Board]({lf_out['look_and_feel_board_https_url']})\n"
-                    f"- [🖼️ **View / Download 3-Up Brand Look & Feel Comparison Board (4K PNG)**]({lf_out['look_and_feel_board_https_url']})\n"
-                    f"- [🖼️ **View / Download 4K Hero Key Visual (PNG)**]({lf_out['hero_4k_https_url']})\n\n"
-                    f"#### 📊 2. 4K Widescreen Slide Deck (`3840 × 2160` Slides + Compiled PDF)\n"
-                    f"![Slide 01 Preview]({deck_out['slide_01_preview_https_url']})\n"
-                    f"- [📥 **Download Full Widescreen Slide Deck (PDF)**]({deck_out['slide_deck_pdf_https_url']})\n\n"
-                    f"#### 📕 3. Extended 4-Page A4 Scientific & Campaign Information Pamphlet\n"
-                    f"![Pamphlet Cover Preview]({pam_out['pamphlet_cover_preview_https_url']})\n"
-                    f"- [📕 **Download 4-Page A4 Information Pamphlet (PDF)**]({pam_out['pamphlet_pdf_https_url']})\n\n"
-                    f"#### 📈 4. Vector SVG & 450-DPI PNG Charts & Synergy Architecture\n"
-                    f"![Evidence Chart]({svg_out['chart_png_https_url']})\n"
-                    f"- [📊 **Download Evidence Chart (Vector SVG)**]({svg_out['chart_svg_https_url']})\n"
-                    f"- [🧬 **View Pathway Synergy Architecture (PNG)**]({svg_out['synergy_diagram_png_https_url']})\n\n"
-                    f"#### 🎬 5. 1080p HD Campaign Video (`{vid_out['video_length_mode'].upper()}` — `{vid_out['duration_seconds']}s`)\n"
-                    f"- [🎬 **Watch / Download 1080p HD Campaign Video (MP4)**]({vid_out['video_mp4_https_url']})\n"
-                )
-                response_md = (response_md + "\n\n" + card).strip() if response_md else card
+                deliv = self.state.get("last_deliverables", {})
+                links_lines: List[str] = []
+                if deliv.get("look_and_feel_4k_url"):
+                    links_lines.append(
+                        f"- 🎨 [🖼️ **View / Download 3-Up Brand Look & Feel Comparison Board (4K PNG)**]({deliv['look_and_feel_4k_url']})"
+                    )
+                if deliv.get("single_page_variations_4k_url"):
+                    links_lines.append(
+                        f"- 🔄 [🖼️ **View / Download 4-Up Single-Page Metaphor Variations Board — Rowing vs. Badminton, Sumo & Vitality (4K PNG)**]({deliv['single_page_variations_4k_url']})"
+                    )
+                if deliv.get("hero_4k_url"):
+                    links_lines.append(
+                        f"- 🌟 [🖼️ **View / Download 4K Anchor Hero Key Visual — Synchronized Rowing Pair (4K PNG)**]({deliv['hero_4k_url']})"
+                    )
+                if deliv.get("slide_deck_pdf_url"):
+                    links_lines.append(
+                        f"- 📊 [📥 **Download Complete 8-Slide 4K Widescreen Presentation Deck (PDF)**]({deliv['slide_deck_pdf_url']})"
+                    )
+                slide_urls = deliv.get("slide_png_urls") or []
+                if slide_urls:
+                    links_lines.append(
+                        f"- 🖼️ [🖼️ **View Slide 01 — Executive Campaign Overview (4K PNG)**]({slide_urls[0]})"
+                    )
+                if deliv.get("pamphlet_pdf_url"):
+                    links_lines.append(
+                        f"- 📕 [📥 **Download 4-Page A4 Scientific & Campaign Information Pamphlet (PDF)**]({deliv['pamphlet_pdf_url']})"
+                    )
+                if deliv.get("pamphlet_page_1_url"):
+                    links_lines.append(
+                        f"- 📄 [🖼️ **View Information Pamphlet Page 1 Cover Preview (High-Res PNG)**]({deliv['pamphlet_page_1_url']})"
+                    )
+                if deliv.get("chart_svg_url"):
+                    links_lines.append(
+                        f"- 📈 [📊 **Download Multi-System Efficacy Chart (Vector SVG)**]({deliv['chart_svg_url']})"
+                    )
+                if deliv.get("video_mp4_url"):
+                    links_lines.append(
+                        f"- 🎬 [🎥 **Watch / Download 1080p HD Complementary Strategies Campaign Video (MP4)**]({deliv['video_mp4_url']})"
+                    )
+
+                if links_lines:
+                    summary_block = (
+                        f"---\n### 📦 Complete Campaign Deliverables Suite ({active_camp})\n"
+                        f"**Single Master Strapline:** *\"{active_strap}\"*  \n"
+                        f"**Recommended Anchor Look & Feel:** **Concept 1 — Synchronized Rowing Pair** *(with 4-Up Single-Page Metaphor Swap Board showing Rowing, Badminton, Sumo & Vitality)*\n\n"
+                        + "\n".join(links_lines)
+                    )
+                    if deliv.get("video_mp4_url") and deliv["video_mp4_url"] not in response_md:
+                        response_md = (response_md + "\n\n" + summary_block).strip() if response_md else summary_block
+                    elif not response_md:
+                        response_md = summary_block
             except Exception as gen_exc:
                 logger.error("Deterministic generation error: %s", gen_exc)
 
@@ -905,6 +999,7 @@ def create_campaign_lab_adk_agent(model_name: Optional[str] = None) -> Agent:
             extract_attached_document_or_image_context,
             generate_4k_campaign_key_visual,
             generate_brand_look_and_feel_variations_4k,
+            generate_single_page_metaphor_swap_board_4k,
             generate_4k_slide_deck,
             generate_extended_campaign_pamphlet_pdf,
             generate_campaign_chart_svg_and_png,

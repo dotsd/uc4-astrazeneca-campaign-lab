@@ -27,6 +27,7 @@ from tools.grounding_tools import (
 from tools.image_tools import (
     generate_4k_campaign_key_visual,
     generate_brand_look_and_feel_variations_4k,
+    generate_single_page_metaphor_swap_board_4k,
 )
 from tools.logo_tools import (
     draw_svg_on_reportlab_canvas,
@@ -49,6 +50,7 @@ __all__ = [
     "generate_pathway_synergy_svg_and_png",
     "generate_4k_campaign_key_visual",
     "generate_brand_look_and_feel_variations_4k",
+    "generate_single_page_metaphor_swap_board_4k",
     "generate_4k_slide_deck",
     "generate_extended_campaign_pamphlet_pdf",
     "generate_campaign_video_mp4",
