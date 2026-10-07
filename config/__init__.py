@@ -17,7 +17,6 @@
 Exposes runtime settings (`Settings`, `get_settings`) and the dynamic brand theme
 and custom hex color palette engine (`BrandTheme`, `PRESET_THEMES`, `parse_brand_theme`).
 """
-from __future__ import annotations
 
 from config.brand_guidelines import (
     PRESET_THEMES,

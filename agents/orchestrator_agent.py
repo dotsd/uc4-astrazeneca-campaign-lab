@@ -21,7 +21,6 @@ Coordinates:
 4. 4K Slide Deck & Extended A4 Pamphlet Agent (Extra-large typography + custom or AstraZeneca theme)
 5. Motion & Video Production Agent (Short 20s or Long 64s 1080p HD MP4 video)
 """
-from __future__ import annotations
 
 import datetime
 import logging

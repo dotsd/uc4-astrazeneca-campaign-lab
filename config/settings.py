@@ -18,7 +18,6 @@ Defines Google Cloud project configuration, dedicated `UC4` Cloud Storage paths,
 V4 Signed URL service account settings, Gemini Enterprise registration targets,
 and Gemini 3.1 / 3.x model identifiers. Contains zero product-specific or Calquence hardcoding.
 """
-from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path

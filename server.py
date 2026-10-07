@@ -13,7 +13,6 @@
 # limitations under the License.
 
 """FastAPI HTTP Service for AstraZeneca Campaign Lab."""
-from __future__ import annotations
 
 from typing import Optional
 from fastapi import FastAPI

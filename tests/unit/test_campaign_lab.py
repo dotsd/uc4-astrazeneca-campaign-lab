@@ -13,7 +13,6 @@
 # limitations under the License.
 
 """Comprehensive Unit & Integration Tests for AstraZeneca Campaign Lab (UC4)."""
-from __future__ import annotations
 
 from pathlib import Path
 from PIL import Image

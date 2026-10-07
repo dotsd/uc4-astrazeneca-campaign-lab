@@ -13,7 +13,6 @@
 # limitations under the License.
 
 """Production Tools Package for AstraZeneca Campaign Lab (UC4)."""
-from __future__ import annotations
 
 from tools.chart_tools import (
     generate_campaign_chart_svg_and_png,

@@ -25,7 +25,6 @@ Examples:
   # Run with Long 64s Video and an attached PDF slide deck:
   python run_campaign_lab.py --campaign "AZD9550" --theme "astrazeneca_dark" --video-length long --attachment path/to/slides.pdf
 """
-from __future__ import annotations
 
 import argparse
 import json

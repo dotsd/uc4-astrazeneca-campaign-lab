@@ -27,7 +27,6 @@ Supports:
 3. Arbitrary user-specified custom branding prompts (extracting Hex codes, RGB values,
    background color instructions, text color instructions, and logo preferences).
 """
-from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field

@@ -13,7 +13,6 @@
 # limitations under the License.
 
 """Multi-Agent Orchestrator & ADK Conversational Agent for AstraZeneca Campaign Lab (UC4)."""
-from __future__ import annotations
 
 from agents.adk_conversational_agent import (
     AstraZenecaCampaignLabADKAgent,

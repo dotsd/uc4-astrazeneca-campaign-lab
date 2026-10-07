@@ -13,7 +13,6 @@
 # limitations under the License.
 
 """Integration tests for AstraZenecaCampaignLabADKAgent session state, V4 signed URLs, and ADK Reasoning Engine."""
-from __future__ import annotations
 
 import unittest
 from agents.adk_conversational_agent import (
